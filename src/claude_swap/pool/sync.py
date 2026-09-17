@@ -8,17 +8,16 @@ from __future__ import annotations
 
 import json
 import logging
-import platform
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from claude_swap import __version__
+from claude_swap.credentials import looks_like_api_key
 from claude_swap.exceptions import PoolAuthError, PoolError
 from claude_swap.oauth import credential_fingerprint
 from claude_swap.pool.blob import blob_fingerprint, blob_from_local, blob_version
-from claude_swap.pool.client import PoolAccountRow, PoolClient
+from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import PoolSession, save_session
 from claude_swap.settings import atomic_write_json
 
@@ -108,11 +107,15 @@ class PoolSync:
             return report
 
         data = self.switcher._get_sequence_data() or {}
-        self._push(report, state, data)
-        self._pull(report, state, data)
-        self._status(report, state)
-        state["lastPassAt"] = self.clock()
-        save_state(self.switcher.backup_dir, state)
+        try:
+            self._push(report, state, data)
+            self._pull(report, state, data)
+            self._status(report, state)
+        except PoolAuthError as e:
+            report.skipped = f"pool session refused ({e}); run: cswap pool login"
+        finally:
+            state["lastPassAt"] = self.clock()
+            save_state(self.switcher.backup_dir, state)
         return report
 
     # -- push ---------------------------------------------------------------------
@@ -132,7 +135,12 @@ class PoolSync:
         if str(data.get("activeAccountNumber")) == num:
             current = self.switcher._get_current_account()
             if current and current[0] == email and current[1] == (record.get("organizationUuid") or ""):
-                creds_text = self.switcher._read_credentials() or None
+                active = self.switcher._read_active_credentials()
+                # A degraded read (Keychain locked, plaintext fallback served) may be
+                # a superseded generation -- never push it, fall through to the backup
+                # instead, same as `_refuse_degraded_capture` elsewhere in the repo.
+                if active.value and not active.degraded and not looks_like_api_key(active.value):
+                    creds_text = active.value
         if not creds_text:
             # `_read_account_credentials` returns "" rather than raising when
             # the backup is missing or unreadable; a falsy result here just
@@ -156,9 +164,8 @@ class PoolSync:
                 landed = self.client.push_credential(
                     self.session, account_id, blob, blob_version(blob), blob_fingerprint(blob), self.machine_id,
                 )
-            except PoolAuthError as e:
-                report.errors.append(f"slot {num}: {e}")
-                return
+            except PoolAuthError:
+                raise
             except PoolError as e:
                 report.errors.append(f"slot {num}: push failed: {e}")
                 continue

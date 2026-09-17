@@ -6,6 +6,8 @@ import json
 
 import pytest
 
+from claude_swap.credentials import ActiveCredentials
+from claude_swap.exceptions import PoolAuthError
 from claude_swap.models import Platform
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import save_session
@@ -101,6 +103,21 @@ class TestPush:
         PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111").run_pass()
         assert fake_pool.row(row.id)["credential_version"] == 3_000
 
+    def test_degraded_live_read_falls_back_to_backup(self, sync_env, fake_pool, owner, temp_home, monkeypatch):
+        s, client, session = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-1", "rt-1", 1_000)
+        _seed(s, "1", "acct-1@x.io", "acct-1", "rt-2", 2_000, pool_id=row.id, owned=True)
+        # this machine is logged in as acct-1, but the live read is degraded
+        # (macOS keychain locked, plaintext fallback served) -- must not push it
+        (temp_home / ".claude.json").write_text(_config("acct-1@x.io", "acct-1"))
+        data = s._get_sequence_data(); data["activeAccountNumber"] = 1; s._write_json(s.sequence_file, data)
+        monkeypatch.setattr(
+            s, "_read_active_credentials",
+            lambda: ActiveCredentials(value=_creds("rt-3", 3_000), keychain_unavailable=True, degraded=True),
+        )
+        PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111").run_pass()
+        assert fake_pool.row(row.id)["credential_version"] == 2_000
+
     def test_local_only_slots_are_ignored(self, sync_env, fake_pool):
         s, client, session = sync_env
         _seed(s, "1", "a@x.io", "acct-1", "rt-1", 1_000)
@@ -132,3 +149,17 @@ class TestPush:
         sync.run_pass()
         from claude_swap.pool.session import load_session
         assert load_session(s.backup_dir).access_token != session.access_token
+
+    def test_session_refused_mid_pass_skips(self, sync_env, fake_pool, owner, monkeypatch):
+        s, client, session = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-1", "rt-1", 1_000)
+        _seed(s, "1", "acct-1@x.io", "acct-1", "rt-2", 2_000, pool_id=row.id, owned=True)
+        monkeypatch.setattr(
+            client, "push_credential",
+            lambda *a, **k: (_ for _ in ()).throw(PoolAuthError("JWT revoked")),
+        )
+        sync = PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111")
+        report = sync.run_pass()
+        assert report.skipped and "cswap pool login" in report.skipped
+        assert report.pushed == []
+        assert load_state(s.backup_dir)["lastPassAt"] is not None
