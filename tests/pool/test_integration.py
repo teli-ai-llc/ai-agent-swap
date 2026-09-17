@@ -3,7 +3,7 @@
     CSWAP_POOL_TEST_URL=https://<ref>.supabase.co \
     CSWAP_POOL_TEST_KEY=<anon key> \
     CSWAP_POOL_TEST_EMAIL=... CSWAP_POOL_TEST_PASSWORD=... \
-    uv run pytest tests/pool/test_integration.py -p no:xdist
+    uv run pytest tests/pool/test_integration.py -n0
 
 Uses a throwaway account uuid so it never touches a real pooled login, and
 withdraws its row at the end.

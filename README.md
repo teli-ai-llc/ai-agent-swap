@@ -394,7 +394,9 @@ limits; your own accounts stay priority 1. When a login's refresh token dies
 for good (it lapsed, or a real logout), whichever machine notices flags it,
 and the owner sees "your account … needs re-login" on `cswap list` and in
 the dashboard. The owner logs in with Claude Code and runs `cswap add`; the
-fresh login flows to everyone.
+fresh login flows to everyone. Until the owner does, other machines keep
+trying to refresh their copy on the usual schedule; each attempt fails the
+same way and is not reported again.
 
 Two machines refreshing the same login inside one interval still race; the
 loser recovers on its next pass. Set `autoswitch.deadTokenStrikes` to 2 or

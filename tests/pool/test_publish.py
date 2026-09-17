@@ -14,7 +14,6 @@ from claude_swap.pool.client import PoolClient
 from claude_swap.pool.cli import maybe_publish_after_add
 from claude_swap.pool.session import save_session
 from claude_swap.pool.sync import PoolSync
-from claude_swap.rules import rule_from_record
 from tests.pool.conftest import _config, _creds, _publish_row, _seed, _switcher
 
 MID = "11111111-1111-1111-1111-111111111111"

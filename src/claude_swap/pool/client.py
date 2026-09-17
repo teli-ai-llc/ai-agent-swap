@@ -13,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 from claude_swap.exceptions import PoolAuthError, PoolError
