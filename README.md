@@ -270,6 +270,7 @@ The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working
 - Switches (manual and automatic) hold Claude Code's own credential locks while writing, so a swap never interleaves with a token refresh
 - Auto-switch freshens a target's token before activating it, and quarantines accounts whose refresh token has died (recover by re-adding it with `cswap add --slot N`, or by replacing its stored credentials from a known-good export — a plain `cswap import backup.cswap` replaces dead-token slots automatically)
 - Usage numbers refresh every few minutes — faster for an account being used or close to switching, slower for idle ones — keeping cswap comfortably inside Anthropic's rate limits however many dashboards you keep open on a machine. An age note like `· 6m ago` just means the next scheduled check hasn't come yet, not that something is stuck.
+- A team pool (optional) syncs pooled logins through a Supabase project every 30 s; see [Team pool](#team-pool-share-logins-with-teammates)
 
 ## Data locations
 
@@ -279,7 +280,7 @@ The original flag spellings (`cswap --switch`, `cswap --list`, ...) keep working
 | macOS | macOS Keychain | `~/.claude-swap-backup/` |
 | Linux / WSL | File-based (inside the backup directory, under `credentials/`) | `${XDG_DATA_HOME:-~/.local/share}/claude-swap/` |
 
-Session-mode profiles (`cswap run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` — cooldown and quarantined accounts; delete it to reset) live in the backup directory root.
+Session-mode profiles (`cswap run`) live under the backup directory in `sessions/`. Tool preferences (`settings.json`) and auto-switch state (`autoswitch_state.json` — cooldown and quarantined accounts; delete it to reset) live in the backup directory root, and the team pool's session, machine id and sync state (pool_session.json, machine_id, pool_state.json).
 
 On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 
@@ -365,6 +366,41 @@ Each account travels with its alias and its [rule](#account-rules--limits-and-pr
 The export file is plaintext JSON and, by default, carries only each account's own login — machine-shared MCP/plugin OAuth tokens and the device token stay on the source machine (`--full` keeps everything, for same-PC backups). If you need encryption, pipe through your tool of choice (e.g. `cswap export - | gpg -c > backup.gpg`).
 
 If an imported account is the one you're currently logged in as, activate the imported credentials with `cswap switch N --force` (a plain `switch` to the current account is a safe no-op and won't touch the import).
+
+### Team pool (share logins with teammates)
+
+A pool is a Supabase project that holds each member's Claude logins so a
+login rotated on any machine reaches every other machine before its copy
+dies. Members are created by the pool admin (see `supabase/README.md`).
+
+```bash
+cswap pool login                     # once per machine: pool URL, anon key, email, password
+cswap add --pool                     # publish the login you are signed in with
+cswap pool share 2 --swap-limit 80 --hard-limit 50   # what borrowers may use of it
+cswap pool unshare 2                 # withdraw it
+cswap pool status                    # who you are, what is linked, what needs attention
+cswap sync --install-service         # macOS: keep syncing at login (else: cswap sync, or cswap auto / the TUI)
+cswap pool logout                    # drops the session and the borrowed accounts
+```
+
+How it works: every 30 s (`pool.pollIntervalSeconds`) a pass pushes any
+pooled login whose refresh token changed here and pulls newer ones from the
+pool. A push only lands if it is newer than what the pool holds, so a slow
+machine never overwrites a fresh rotation. The pass runs inside `cswap auto`,
+the TUI, the menu bar panel, and `cswap sync`.
+
+Borrowed accounts arrive as priority 2 with the owner's swap and hard
+limits; your own accounts stay priority 1. When a login's refresh token dies
+for good (it lapsed, or a real logout), whichever machine notices flags it,
+and the owner sees "your account … needs re-login" on `cswap list` and in
+the dashboard. The owner logs in with Claude Code and runs `cswap add`; the
+fresh login flows to everyone.
+
+Two machines refreshing the same login inside one interval still race; the
+loser recovers on its next pass. Set `autoswitch.deadTokenStrikes` to 2 or
+more on pooled machines so that lag never reads as a dead token. Limits are
+honoured by each teammate's cswap, not enforced by the server: anyone in the
+pool can read a shared login's token bytes.
 
 ### JSON output for scripting
 
