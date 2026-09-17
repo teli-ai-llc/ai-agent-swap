@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 
-from claude_swap.exceptions import PoolError
+from claude_swap.exceptions import PoolError, TransferError
 from claude_swap.oauth import credential_fingerprint
 from claude_swap.transfer import _slim_config, _slim_credentials
 
@@ -34,7 +34,7 @@ def blob_from_local(creds_text: str, config_text: str) -> dict:
     slim_creds = _slim_credentials(creds)
     try:
         slim_config = _slim_config(config, "config")
-    except Exception as e:  # TransferError
+    except TransferError as e:
         raise PoolError(str(e)) from None
     return validate_blob({**slim_config, **slim_creds})
 

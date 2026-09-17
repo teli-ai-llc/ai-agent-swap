@@ -65,6 +65,8 @@ class TestMachineId:
         uuid.UUID(first)  # valid uuid
         assert machine_id(tmp_path) == first
         assert (tmp_path / MACHINE_ID_FILENAME).read_text().strip() == first
+        # No temp file left behind
+        assert not list(tmp_path.glob("*.tmp"))
 
     def test_garbage_file_is_replaced(self, tmp_path):
         (tmp_path / MACHINE_ID_FILENAME).write_text("not-a-uuid\n")

@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
+import tempfile
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
+from claude_swap.fsutil import replace_with_retry
 from claude_swap.settings import atomic_write_json
 
 POOL_SESSION_FILENAME = "pool_session.json"
@@ -98,7 +101,21 @@ def machine_id(backup_root: Path) -> str:
         pass
     fresh = str(uuid.uuid4())
     backup_root.mkdir(parents=True, exist_ok=True)
-    path.write_text(fresh + "\n", encoding="utf-8")
-    if os.name != "nt":
-        os.chmod(path, 0o600)
+    fd, tmp_path = tempfile.mkstemp(dir=str(backup_root), suffix=".tmp")
+    try:
+        os.write(fd, (fresh + "\n").encode("utf-8"))
+        os.close(fd)
+        fd = -1
+        replace_with_retry(tmp_path, str(path))
+        if sys.platform != "win32":
+            os.chmod(str(path), 0o600)
+            os.chmod(str(backup_root), 0o700)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     return fresh
