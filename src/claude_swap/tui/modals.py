@@ -9,7 +9,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Static
+from textual.widgets import Button, Checkbox, Input, Label, Static
 
 from claude_swap.rules import (
     AccountRule,
@@ -243,6 +243,192 @@ class RuleModal(ModalScreen["RuleForm | None"]):
             self.query_one("#form-error", Static).update(str(exc))
             return
         self.dismiss(RuleForm(swap, hard, priority))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass(frozen=True)
+class PoolLoginForm:
+    """What the pool login modal collects."""
+
+    url: str
+    anon_key: str
+    email: str
+    password: str
+
+
+class PoolLoginModal(ModalScreen["PoolLoginForm | None"]):
+    """Collects the pool URL/anon key and a member's email/password.
+
+    The anon key and password use ``password=True`` so neither is
+    shoulder-surfable. Same ←/→ button navigation as the other forms.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("left", "app.focus_previous", show=False),
+        Binding("right", "app.focus_next", show=False),
+    ]
+
+    def __init__(self, url: str | None, anon_key: str | None) -> None:
+        super().__init__()
+        self._url = url or ""
+        self._anon_key = anon_key or ""
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box"):
+            yield Label("Log in to the pool", classes="modal-title")
+            yield Static(
+                "Sign in with your pool member email and password.",
+                classes="modal-body",
+            )
+            yield Input(value=self._url, placeholder="pool URL", id="url")
+            yield Input(
+                value=self._anon_key,
+                password=True,
+                placeholder="anon key",
+                id="anon-key",
+            )
+            yield Input(placeholder="email", id="email")
+            yield Input(password=True, placeholder="password", id="password")
+            yield Static("", id="form-error", classes="form-error")
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Log in", id="login")
+                yield Button("Cancel", id="cancel")
+            yield Static(
+                "enter log in  ·  tab next field  ·  esc cancel",
+                classes="modal-hint",
+            )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        url = self.query_one("#url", Input).value.strip().rstrip("/")
+        anon_key = self.query_one("#anon-key", Input).value.strip()
+        email = self.query_one("#email", Input).value.strip()
+        password = self.query_one("#password", Input).value.strip()
+        if not (url and anon_key and email and password):
+            self.query_one("#form-error", Static).update(
+                "URL, anon key, email, and password are all required."
+            )
+            return
+        self.dismiss(
+            PoolLoginForm(url=url, anon_key=anon_key, email=email, password=password)
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+@dataclass(frozen=True)
+class PoolShareForm:
+    """What the pool share modal collects (already validated)."""
+
+    shared: bool
+    swap_limit: float | None
+    hard_limit: float | None
+
+
+class PoolShareModal(ModalScreen["PoolShareForm | None"]):
+    """Publish/withdraw an account and set its pool-visible limits.
+
+    Blank swap/hard limit fields mean none. Same ←/→ button navigation as
+    the other forms.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel", show=False),
+        Binding("left", "app.focus_previous", show=False),
+        Binding("right", "app.focus_next", show=False),
+    ]
+
+    def __init__(
+        self, number: str, label: str, current: PoolShareForm | None
+    ) -> None:
+        super().__init__()
+        self._number = number
+        self._label = label
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        current = self._current
+        shared = current.shared if current is not None else True
+        swap_value = (
+            ""
+            if current is None or current.swap_limit is None
+            else f"{current.swap_limit:.10g}"
+        )
+        hard_value = (
+            ""
+            if current is None or current.hard_limit is None
+            else f"{current.hard_limit:.10g}"
+        )
+        with Vertical(classes="modal-box"):
+            yield Label(
+                f"Share account {self._number} · {self._label}",
+                classes="modal-title",
+            )
+            yield Static(
+                "Publish this account to the pool so other members can "
+                "borrow it.\n"
+                "swap limit: pool members stop routing to it past this % "
+                "(blank = none).\n"
+                "hard limit: pool members may not use it past this % "
+                "(blank = none).",
+                classes="modal-body",
+            )
+            yield Checkbox("Shared with the pool", value=shared, id="shared")
+            yield Input(
+                value=swap_value,
+                placeholder="swap limit % (blank = none)",
+                id="swap",
+                type="number",
+            )
+            yield Input(
+                value=hard_value,
+                placeholder="hard limit % (blank = none)",
+                id="hard",
+                type="number",
+            )
+            yield Static("", id="form-error", classes="form-error")
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Publish", id="publish")
+                yield Button("Cancel", id="cancel")
+            yield Static(
+                "enter publish  ·  tab next field  ·  esc cancel",
+                classes="modal-hint",
+            )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+            return
+        self._submit()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._submit()
+
+    def _submit(self) -> None:
+        shared = self.query_one("#shared", Checkbox).value
+        swap_raw = self.query_one("#swap", Input).value
+        hard_raw = self.query_one("#hard", Input).value
+        try:
+            swap_limit = parse_swap_limit(swap_raw)
+            hard_limit = None if not hard_raw.strip() else parse_hard_limit(hard_raw)
+        except ValueError as exc:
+            self.query_one("#form-error", Static).update(str(exc))
+            return
+        self.dismiss(
+            PoolShareForm(shared=shared, swap_limit=swap_limit, hard_limit=hard_limit)
+        )
 
     def action_cancel(self) -> None:
         self.dismiss(None)
