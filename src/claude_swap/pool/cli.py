@@ -10,7 +10,7 @@ import sys
 import time
 
 from claude_swap import __version__
-from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
+from claude_swap.exceptions import ClaudeSwitchError, PoolError
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import clear_session, load_session, machine_id, save_session
 from claude_swap.pool.sync import PassReport, PoolSync, build_sync, load_state
@@ -129,6 +129,7 @@ def _logout(switcher: ClaudeAccountSwitcher, args) -> None:
         print(dimmed("Not logged in to a pool."))
         return
     data = switcher._get_sequence_data() or {}
+    kept_due_to_failure = []
     for num in sorted((data.get("accounts") or {}).keys(), key=int):
         account_id, owned = switcher.slot_pool_info(num)
         if not account_id:
@@ -136,9 +137,24 @@ def _logout(switcher: ClaudeAccountSwitcher, args) -> None:
         if owned or args.keep:
             switcher.set_slot_pool_info(num, None, False)
         else:
-            switcher.remove_account(num, assume_yes=True)
+            email = (data.get("accounts") or {}).get(num, {}).get("email", "")
+            try:
+                switcher.remove_account(num, assume_yes=True)
+            except ClaudeSwitchError as e:
+                # Logout always completes: a slot that refuses to be removed
+                # (e.g. it is the live Claude Code session) just stays as a
+                # plain local account instead of blocking the sign-out.
+                switcher.set_slot_pool_info(num, None, False)
+                print_warning(f"kept account {num} ({email}) locally: {e}")
+                kept_due_to_failure.append(num)
     clear_session(switcher.backup_dir)
-    print(f"{accent('Logged out')} of the pool" + ("; borrowed accounts kept" if args.keep else "; borrowed accounts removed"))
+    if args.keep:
+        suffix = "; borrowed accounts kept"
+    elif kept_due_to_failure:
+        suffix = f"; {len(kept_due_to_failure)} borrowed account(s) kept locally (see above)"
+    else:
+        suffix = "; borrowed accounts removed"
+    print(f"{accent('Logged out')} of the pool" + suffix)
 
 
 def _status(switcher: ClaudeAccountSwitcher, args) -> None:
@@ -155,7 +171,7 @@ def _status(switcher: ClaudeAccountSwitcher, args) -> None:
         print(json.dumps({
             "schemaVersion": 1,
             "member": None if session is None else {"email": session.email, "userId": session.user_id, "url": session.url},
-            "machineId": machine_id(switcher.backup_dir),
+            "machineId": None if session is None else machine_id(switcher.backup_dir),
             "lastPassAt": state.get("lastPassAt"),
             "accounts": rows,
             "attention": state.get("attention", []),

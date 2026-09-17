@@ -82,6 +82,34 @@ class TestLogoutAndStatus:
         assert all("poolAccountId" not in a for a in accounts.values())
         assert load_session(s.backup_dir) is None
 
+    def test_logout_keeps_a_slot_whose_removal_fails(self, wired, owner, borrower, monkeypatch, capsys):
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
+        _publish_row(wired, client, owner, "acct-o2", "rt-2", 1_000)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "pw-borrower")
+        _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key, "--email", "borrower@x.io"])
+
+        from claude_swap.exceptions import ClaudeSwitchError
+        from claude_swap.switcher import ClaudeAccountSwitcher
+        real_remove = ClaudeAccountSwitcher.remove_account
+
+        def fake_remove(self, identifier, assume_yes=False):
+            if str(identifier) == "1":
+                raise ClaudeSwitchError("live session")
+            return real_remove(self, identifier, assume_yes=assume_yes)
+
+        monkeypatch.setattr(ClaudeAccountSwitcher, "remove_account", fake_remove)
+        capsys.readouterr()
+        _run(["pool", "logout"])
+        out = capsys.readouterr().out
+        assert "kept account 1" in out
+        assert load_session(s.backup_dir) is None
+        accounts = s._get_sequence_data()["accounts"]
+        assert "1" in accounts
+        assert "poolAccountId" not in accounts["1"]
+        assert "2" not in accounts
+
     def test_logout_keep(self, wired, owner, borrower, monkeypatch):
         s = _switcher()
         client = client_mod.PoolClient(wired.base_url, wired.anon_key)
@@ -108,6 +136,12 @@ class TestLogoutAndStatus:
         assert payload["attention"] == []
 
     def test_status_when_logged_out(self, temp_home, capsys):
-        _switcher()
+        from claude_swap.pool.session import MACHINE_ID_FILENAME
+
+        s = _switcher()
         _run(["pool", "status"])
         assert "Not logged in to a pool" in capsys.readouterr().out
+        _run(["pool", "status", "--json"])
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["machineId"] is None
+        assert not (s.backup_dir / MACHINE_ID_FILENAME).exists()
