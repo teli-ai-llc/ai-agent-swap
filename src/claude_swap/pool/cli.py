@@ -14,7 +14,7 @@ from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError, PoolError
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import clear_session, load_session, machine_id, save_session
-from claude_swap.pool.sync import POOL_SCHEMA_VERSION, PassReport, PoolSync, _ago, build_sync, load_state
+from claude_swap.pool.sync import POOL_SCHEMA_VERSION, PassReport, PoolSync, _ago, build_sync, load_state, reset_state
 from claude_swap.printer import accent, bolded, dimmed, error as print_error, warning as print_warning, yellowed
 from claude_swap.settings import load_pool_settings, load_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -120,6 +120,7 @@ def logout_pool(switcher: ClaudeAccountSwitcher, *, keep: bool) -> LogoutResult:
                 switcher.set_slot_pool_info(num, None, False)
                 kept.append((num, email, str(e)))
     clear_session(switcher.backup_dir)
+    reset_state(switcher.backup_dir)
     return LogoutResult(removed=removed, kept=kept, unlinked=unlinked)
 
 

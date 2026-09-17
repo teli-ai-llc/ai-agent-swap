@@ -76,6 +76,17 @@ def save_state(backup_root: Path, state: dict) -> None:
     atomic_write_json(_state_path(backup_root), state)
 
 
+def reset_state(backup_root: Path) -> None:
+    """Wipe the pull watermark and push/flag/attention bookkeeping.
+
+    Used by ``logout_pool``: without this, a member who logs out and back in
+    on the same machine keeps the old ``pulledAt`` watermark, so a pull never
+    re-fetches rows that haven't changed server-side since — accounts removed
+    at logout would never come back on a fresh login.
+    """
+    save_state(backup_root, _empty_state())
+
+
 class PoolSync:
     def __init__(self, switcher, client: PoolClient, session: PoolSession, *,
                  machine_id: str, clock: Callable[[], float] = time.time):

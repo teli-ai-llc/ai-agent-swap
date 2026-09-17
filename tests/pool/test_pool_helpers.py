@@ -113,6 +113,30 @@ class TestLogoutPool:
         with pytest.raises(PoolError):
             logout_pool(s, keep=False)
 
+    def test_logout_then_relogin_relands_borrowed_accounts(self, wired, owner, borrower):
+        # logout_pool must reset the pull watermark (pool_state.json), or a
+        # same-machine re-login never re-pulls rows that didn't change
+        # server-side, so a borrowed slot removed at logout never comes back.
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
+
+        result1 = login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        assert result1.report.added == ["1"]
+
+        logout_result = logout_pool(s, keep=False)
+        assert logout_result.removed == ["1"]
+        assert "1" not in (s._get_sequence_data().get("accounts") or {})
+
+        result2 = login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        assert result2.report.added == ["1"]
+        assert "1" in (s._get_sequence_data().get("accounts") or {})
+
+        result3 = logout_pool(s, keep=True)
+        assert result3.removed == []
+        assert result3.unlinked == ["1"]
+        assert "1" in (s._get_sequence_data().get("accounts") or {})
+
 
 class TestStatusLines:
     def test_status_lines_logged_out_and_in(self, wired, owner):
