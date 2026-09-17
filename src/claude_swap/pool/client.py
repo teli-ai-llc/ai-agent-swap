@@ -243,6 +243,10 @@ class PoolClient:
         })
         return PoolAccountRow.from_json(rows[0]) if rows else None
 
+    def get_account(self, session: PoolSession, account_id: str) -> PoolAccountRow | None:
+        rows = self._rest(session, "GET", "pool_accounts", params={"select": "*", "id": f"eq.{account_id}"})
+        return PoolAccountRow.from_json(rows[0]) if rows else None
+
     def create_account(self, session: PoolSession, fields: dict) -> PoolAccountRow:
         rows = self._rest(session, "POST", "pool_accounts", body=fields, prefer="return=representation")
         if not rows:

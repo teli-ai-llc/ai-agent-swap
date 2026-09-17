@@ -82,6 +82,7 @@ class PoolSync:
         self.session = session
         self.machine_id = machine_id
         self.clock = clock
+        self._dead_at_start: set[str] = set()
 
     # -- pass ---------------------------------------------------------------------
     def run_pass(self) -> PassReport:
@@ -107,6 +108,10 @@ class PoolSync:
             return report
 
         data = self.switcher._get_sequence_data() or {}
+        self._dead_at_start = {
+            num for num, record, _id, _o in self._pooled_slots(data)
+            if self.switcher._slot_token_dead(num, record.get("email", ""))
+        }
         try:
             self._push(report, state, data)
             self._pull(report, state, data)
@@ -290,6 +295,36 @@ class PoolSync:
         self.switcher._write_json(self.switcher.sequence_file, data)
         return num
 
-    # -- status: Task 9 ---------------------------------------------------------
+    # -- status -------------------------------------------------------------------
     def _status(self, report: PassReport, state: dict) -> None:
-        return None
+        data = self.switcher._get_sequence_data() or {}
+        attention: list[dict] = []
+        for num, record, account_id, owned in self._pooled_slots(data):
+            email = record.get("email", "")
+            if num in report.pulled and num in state["flagged"]:
+                state["flagged"].pop(num, None)
+            if num in report.pulled and num in self._dead_at_start:
+                report.healed.append(num)
+            dead = self.switcher._slot_token_dead(num, email)
+            fp = credential_fingerprint(self.switcher._read_account_credentials(num, email)) or ""
+            if dead and state["flagged"].get(num) != fp:
+                try:
+                    self.client.set_status(self.session, account_id, "needs_relogin", self.machine_id)
+                except PoolAuthError:
+                    raise
+                except PoolError as e:
+                    report.errors.append(f"slot {num}: could not report dead lineage: {e}")
+                else:
+                    state["flagged"][num] = fp
+                    report.flagged.append(num)
+            if owned:
+                try:
+                    row = self.client.get_account(self.session, account_id)
+                except PoolAuthError:
+                    raise
+                except PoolError:
+                    row = None
+                if row is not None and row.status == "needs_relogin":
+                    attention.append({"email": email, "since": row.needs_relogin_since,
+                                      "reportedBy": row.needs_relogin_reported_by})
+        state["attention"] = attention
