@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from claude_swap.exceptions import AccountNotFoundError
 from claude_swap.models import Platform
 from claude_swap.switcher import ClaudeAccountSwitcher
 
@@ -50,7 +51,7 @@ class TestSlotPoolInfo:
 
     def test_unknown_slot_raises(self, temp_home):
         s = _switcher()
-        with pytest.raises(KeyError):
+        with pytest.raises(AccountNotFoundError):
             s.set_slot_pool_info("4", "row", False)
 
 

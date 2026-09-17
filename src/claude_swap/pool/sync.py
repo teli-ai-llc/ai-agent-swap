@@ -234,7 +234,12 @@ class PoolSync:
             if mine:
                 self.switcher.set_slot_pool_info(num, None, False)
             else:
-                self.switcher.remove_account(num, assume_yes=True)
+                try:
+                    self.switcher.remove_account(num, assume_yes=True, quiet=True)
+                except ClaudeSwitchError as e:
+                    self.switcher.set_slot_pool_info(num, None, False)
+                    report.errors.append(f"{row.email}: kept locally, could not remove: {e}")
+                    return
                 state["pushed"].pop(num, None)
                 report.removed.append(num)
             return
@@ -274,27 +279,29 @@ class PoolSync:
 
     def _land_new_row(self, row: PoolAccountRow, mine: bool,
                       creds_text: str, config_text: str) -> str:
+        from claude_swap.locking import FileLock
         from claude_swap.models import get_timestamp
         from claude_swap.rules import apply_rule
 
-        num = str(self.switcher._get_next_account_number())
-        self.switcher._write_account_credentials(num, row.email, creds_text)
-        self.switcher._write_account_config(num, row.email, config_text)
-        data = self.switcher._get_sequence_data() or {"accounts": {}, "sequence": [], "activeAccountNumber": None}
-        record = {
-            "email": row.email, "uuid": row.account_uuid,
-            "organizationUuid": row.organization_uuid, "organizationName": row.organization_name,
-            "added": get_timestamp(), "poolAccountId": row.id, "poolOwned": mine,
-        }
-        if not mine:
-            apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
-                       hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0)
-        data.setdefault("accounts", {})[num] = record
-        if int(num) not in data.setdefault("sequence", []):
-            data["sequence"].append(int(num))
-            data["sequence"].sort()
-        data["lastUpdated"] = get_timestamp()
-        self.switcher._write_json(self.switcher.sequence_file, data)
+        with FileLock(self.switcher.lock_file):
+            num = str(self.switcher._get_next_account_number())
+            self.switcher._write_account_credentials(num, row.email, creds_text)
+            self.switcher._write_account_config(num, row.email, config_text)
+            data = self.switcher._get_sequence_data() or {"accounts": {}, "sequence": [], "activeAccountNumber": None}
+            record = {
+                "email": row.email, "uuid": row.account_uuid,
+                "organizationUuid": row.organization_uuid, "organizationName": row.organization_name,
+                "added": get_timestamp(), "poolAccountId": row.id, "poolOwned": mine,
+            }
+            if not mine:
+                apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
+                           hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0)
+            data.setdefault("accounts", {})[num] = record
+            if int(num) not in data.setdefault("sequence", []):
+                data["sequence"].append(int(num))
+                data["sequence"].sort()
+            data["lastUpdated"] = get_timestamp()
+            self.switcher._write_json(self.switcher.sequence_file, data)
         return num
 
     # -- status -------------------------------------------------------------------

@@ -138,6 +138,22 @@ class TestAfterAdd:
         maybe_publish_after_add(s, "1", None)
         assert fake_pool.row(row.id)["credential_version"] == 2_000
 
+    def test_borrowed_linked_slot_reports_pool_not_updated(self, owner_env, capsys):
+        s, client, session = owner_env
+        _seed(s, "2", "borrowed@x.io", "acct-b", "rt-1", 1_000, pool_id="row-borrowed", owned=False)
+        maybe_publish_after_add(s, "2", None)
+        out = capsys.readouterr().out
+        assert "belongs to another member" in out
+        assert "the pool was not" in out
+
+    def test_relinked_owned_slot_reports_a_skipped_pass(self, owner_env, fake_pool, monkeypatch, capsys):
+        s, client, session = owner_env
+        PoolSync(s, client, session, machine_id=MID).publish_slot("1", shared=True, swap_limit=None, hard_limit=None)
+        fake_pool.offline = True
+        maybe_publish_after_add(s, "1", None)
+        out = capsys.readouterr().out
+        assert "Pool:" in out and "unreachable" in out
+
     def test_not_logged_in_is_silent(self, temp_home, monkeypatch):
         s = _switcher()
         _seed(s, "1", "mine@x.io", "acct-mine", "rt-1", 1_000)

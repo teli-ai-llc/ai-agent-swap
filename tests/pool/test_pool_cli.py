@@ -94,10 +94,10 @@ class TestLogoutAndStatus:
         from claude_swap.switcher import ClaudeAccountSwitcher
         real_remove = ClaudeAccountSwitcher.remove_account
 
-        def fake_remove(self, identifier, assume_yes=False):
+        def fake_remove(self, identifier, assume_yes=False, quiet=False):
             if str(identifier) == "1":
                 raise ClaudeSwitchError("live session")
-            return real_remove(self, identifier, assume_yes=assume_yes)
+            return real_remove(self, identifier, assume_yes=assume_yes, quiet=quiet)
 
         monkeypatch.setattr(ClaudeAccountSwitcher, "remove_account", fake_remove)
         capsys.readouterr()
@@ -134,6 +134,26 @@ class TestLogoutAndStatus:
         assert payload["accounts"][0] == {"number": 1, "email": "acct-o@x.io", "owned": False,
                                           "poolAccountId": payload["accounts"][0]["poolAccountId"]}
         assert payload["attention"] == []
+
+    def test_status_reports_relative_attention_age(self, wired, owner, borrower, monkeypatch, capsys):
+        from datetime import datetime, timedelta, timezone
+
+        from claude_swap.pool.sync import load_state, save_state
+
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
+        monkeypatch.setattr("getpass.getpass", lambda prompt="": "pw-borrower")
+        _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key, "--email", "borrower@x.io"])
+        since = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+        state = load_state(s.backup_dir)
+        state["attention"] = [{"email": "acct-o@x.io", "since": since, "reportedBy": "m"}]
+        save_state(s.backup_dir, state)
+        capsys.readouterr()
+        _run(["pool", "status"])
+        out = capsys.readouterr().out
+        assert "reported 5m ago" in out
+        assert since not in out
 
     def test_status_when_logged_out(self, temp_home, capsys):
         from claude_swap.pool.session import MACHINE_ID_FILENAME

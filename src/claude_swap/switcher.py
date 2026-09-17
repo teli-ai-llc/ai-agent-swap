@@ -1963,7 +1963,7 @@ class ClaudeAccountSwitcher:
             data = self._get_sequence_data() or {}
             record = (data.get("accounts") or {}).get(str(num))
             if record is None:
-                raise KeyError(f"no account in slot {num}")
+                raise AccountNotFoundError(f"no account in slot {num}")
             if account_id:
                 record["poolAccountId"] = account_id
                 record["poolOwned"] = bool(owned)
@@ -4058,11 +4058,13 @@ class ClaudeAccountSwitcher:
             f"{muted('[personal]')} {muted(f'(from {source_label})')}"
         )
 
-    def remove_account(self, identifier: str, assume_yes: bool = False) -> None:
+    def remove_account(self, identifier: str, assume_yes: bool = False, quiet: bool = False) -> None:
         """Remove account from managed accounts.
 
         When ``assume_yes`` is True the confirmation prompt is skipped (used by
-        the TUI, which collects confirmation before calling).
+        the TUI, which collects confirmation before calling). When ``quiet`` is
+        True every print/warning is skipped (used by background callers, e.g.
+        the pool sync loop, that must not print from a non-main thread).
         """
         self._refuse_session_shell()
         if not self.sequence_file.exists():
@@ -4086,18 +4088,20 @@ class ClaudeAccountSwitcher:
                     if acc.get("email") == identifier
                 ]
                 if len(matches) > 1:
-                    print(f"Multiple accounts found for '{identifier}':")
-                    for num in matches:
-                        acc = data["accounts"][num]
-                        tag = self._get_display_tag(
-                            acc.get("email", ""),
-                            acc.get("organizationName", ""),
-                            acc.get("organizationUuid", ""),
-                        )
-                        print(f"  {num}: {identifier} {muted(f'[{tag}]')}")
+                    if not quiet:
+                        print(f"Multiple accounts found for '{identifier}':")
+                        for num in matches:
+                            acc = data["accounts"][num]
+                            tag = self._get_display_tag(
+                                acc.get("email", ""),
+                                acc.get("organizationName", ""),
+                                acc.get("organizationUuid", ""),
+                            )
+                            print(f"  {num}: {identifier} {muted(f'[{tag}]')}")
                     choice = input("Enter account number to remove: ").strip()
                     if not choice.isdigit() or choice not in matches:
-                        print(dimmed("Cancelled"))
+                        if not quiet:
+                            print(dimmed("Cancelled"))
                         return
                     identifier = choice
 
@@ -4120,7 +4124,7 @@ class ClaudeAccountSwitcher:
         # _delete_account_files re-checks as a safety net for all paths.
         self._ensure_no_live_session(account_num, email, "--remove-account")
 
-        if str(active_account) == account_num:
+        if str(active_account) == account_num and not quiet:
             warning(f"Warning: Account-{account_num} ({email}) is currently active")
 
         if not assume_yes:
@@ -4129,7 +4133,8 @@ class ClaudeAccountSwitcher:
                 f"Account-{account_num} ({email})? [y/N] "
             )
             if confirm.lower() != "y":
-                print(dimmed("Cancelled"))
+                if not quiet:
+                    print(dimmed("Cancelled"))
                 return
 
         # Remove backup files
@@ -4142,7 +4147,8 @@ class ClaudeAccountSwitcher:
 
         self._write_json(self.sequence_file, data)
         self._logger.info(f"Removed account {account_num}: {email}")
-        print(f"{accent('Removed')} Account-{account_num} ({email})")
+        if not quiet:
+            print(f"{accent('Removed')} Account-{account_num} ({email})")
 
         self._prune_mappings(email, account_info.get("organizationUuid", ""))
 

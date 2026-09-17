@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.pool.sync import PoolSync, load_state
 from claude_swap.rules import rule_from_record
 from tests.pool.conftest import _config, _creds, _publish_row, _seed
@@ -110,6 +111,23 @@ class TestPull:
         report = PoolSync(s, client, session, machine_id=MID).run_pass()
         assert report.removed == ["3"]
         assert "3" not in s._get_sequence_data()["accounts"]
+
+    def test_refused_removal_keeps_slot_unlinked(self, sync_env, fake_pool, owner, borrower, monkeypatch):
+        s, client, _ = sync_env
+        session = fake_pool.session_for(borrower)
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
+        client.set_status(fake_pool.session_for(owner), row.id, "withdrawn", MID)
+
+        def _raise(*a, **k):
+            raise ClaudeSwitchError("live session")
+        monkeypatch.setattr(s, "remove_account", _raise)
+        report = PoolSync(s, client, session, machine_id=MID).run_pass()
+        assert report.removed == []
+        assert "3" in s._get_sequence_data()["accounts"]
+        assert s.slot_pool_info("3") == (None, False)
+        assert report.errors
+        assert load_state(s.backup_dir)["pulledAt"] == fake_pool.row(row.id)["updated_at"]
 
     def test_invalid_blob_is_skipped_and_watermark_advances(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env

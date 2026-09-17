@@ -13,7 +13,7 @@ from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError, PoolError
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import clear_session, load_session, machine_id, save_session
-from claude_swap.pool.sync import PassReport, PoolSync, build_sync, load_state
+from claude_swap.pool.sync import PassReport, PoolSync, _ago, build_sync, load_state
 from claude_swap.printer import accent, bolded, dimmed, error as print_error, warning as print_warning
 from claude_swap.settings import load_pool_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -139,7 +139,7 @@ def _logout(switcher: ClaudeAccountSwitcher, args) -> None:
         else:
             email = (data.get("accounts") or {}).get(num, {}).get("email", "")
             try:
-                switcher.remove_account(num, assume_yes=True)
+                switcher.remove_account(num, assume_yes=True, quiet=True)
             except ClaudeSwitchError as e:
                 # Logout always completes: a slot that refuses to be removed
                 # (e.g. it is the live Claude Code session) just stays as a
@@ -188,7 +188,7 @@ def _status(switcher: ClaudeAccountSwitcher, args) -> None:
         tag = "owned" if row["owned"] else "borrowed"
         print(f"  {row['number']:>2}  {row['email']}  {dimmed(tag)}")
     for item in state.get("attention", []):
-        print_warning(f"  your account {item['email']} needs re-login (reported {item.get('since') or 'recently'}); "
+        print_warning(f"  your account {item['email']} needs re-login (reported {_ago(item.get('since'), time.time())}); "
                       "log in with Claude Code, then run: cswap add")
 
 
@@ -229,10 +229,15 @@ def maybe_publish_after_add(switcher: ClaudeAccountSwitcher, num: str, choice: b
     try:
         if account_id and owned:
             report = sync.run_pass()
+            if report.skipped:
+                print_warning(f"  Pool: {report.skipped}")
+            for err in report.errors:
+                print_warning(f"  Pool: {err}")
             if report.pushed:
                 print(dimmed("  Pool: fresh login published"))
             return
         if account_id and not owned:
+            print(dimmed("  Pool: this account belongs to another member; your local copy was updated, the pool was not"))
             return
         if choice is None:
             if not (sys.stdin.isatty() and sys.stdout.isatty()):
