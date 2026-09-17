@@ -252,5 +252,77 @@ def maybe_publish_after_add(switcher: ClaudeAccountSwitcher, num: str, choice: b
 
 
 # -- sync ------------------------------------------------------------------------
+SYNC_LABEL = "com.cswap.sync"
+
+
 def sync_command(argv: list[str]) -> None:
-    raise SystemExit("cswap sync: implemented in Task 12")
+    parser = argparse.ArgumentParser(
+        prog=f"{_prog()} sync",
+        description="Push this machine's rotated pool logins and pull everyone else's. "
+                    "Runs forever unless --once.",
+    )
+    parser.add_argument("--once", action="store_true", help="One pass, then exit (0 ok, 1 skipped, 2 errors)")
+    parser.add_argument("--install-service", action="store_true", help="macOS: run at login via launchd")
+    parser.add_argument("--uninstall-service", action="store_true")
+    parser.add_argument("--service-status", action="store_true")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.install_service or args.uninstall_service or args.service_status:
+        _sync_service(args)
+        return
+
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+    except ClaudeSwitchError as e:
+        print_error(str(e))
+        sys.exit(1)
+
+    def one_pass() -> PassReport | None:
+        sync = build_sync(switcher)
+        if sync is None:
+            print(dimmed("Not logged in to a pool (or pool.enabled is false). Run: cswap pool login"))
+            return None
+        report = sync.run_pass()
+        _print_report(report)
+        return report
+
+    if args.once:
+        report = one_pass()
+        if report is None or report.skipped:
+            sys.exit(1)
+        sys.exit(2 if report.errors else 0)
+
+    interval = load_pool_settings(switcher.backup_dir).poll_interval_seconds
+    print(dimmed(f"Syncing every {interval:g}s; Ctrl-C to stop"))
+    try:
+        while True:
+            one_pass()
+            time.sleep(interval)
+            interval = load_pool_settings(switcher.backup_dir).poll_interval_seconds
+    except KeyboardInterrupt:
+        print()
+        sys.exit(0)
+
+
+def _sync_service(args) -> None:
+    if sys.platform != "darwin":
+        print_error("The sync service is only available on macOS. Elsewhere run `cswap sync` under your service manager.")
+        sys.exit(1)
+    from claude_swap import launch_agent
+    try:
+        if args.install_service:
+            result = launch_agent.install(label=SYNC_LABEL, arguments=("sync",))
+            print(f"{accent('Installed')} {SYNC_LABEL} ({result.get('plist')})")
+            print(dimmed("  Logs: ~/Library/Logs/com.cswap.sync.{log,err}"))
+            sys.exit(0)
+        if args.uninstall_service:
+            launch_agent.uninstall(label=SYNC_LABEL)
+            print(f"{accent('Removed')} {SYNC_LABEL}")
+            sys.exit(0)
+        status = launch_agent.status(label=SYNC_LABEL)
+        print(json.dumps(status, indent=2))
+        sys.exit(0)
+    except ClaudeSwitchError as e:
+        print_error(str(e))
+        sys.exit(1)
