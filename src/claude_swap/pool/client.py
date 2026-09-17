@@ -129,7 +129,14 @@ class PoolClient:
         )
         data = self._decode(body)
         if status in (400, 401, 403):
-            detail = data.get("error_description") or data.get("message") or data.get("error") or "refused"
+            # GoTrue has used several envelopes over time: OAuth-style
+            # ``error``/``error_description``, ``message``, and the current
+            # ``msg`` + ``error_code`` pair ("Email not confirmed").
+            detail = (
+                data.get("error_description") or data.get("msg")
+                or data.get("message") or data.get("error_code")
+                or data.get("error") or "refused"
+            )
             raise PoolAuthError(f"pool sign-in refused: {detail}")
         if status >= 300:
             raise PoolError(f"pool auth endpoint answered HTTP {status}")

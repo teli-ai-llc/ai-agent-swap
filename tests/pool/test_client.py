@@ -163,3 +163,13 @@ class TestRest:
         })
         assert row.organization_uuid == "" and row.credential is None
         assert row.credential_version == 5 and row.share_hard_limit is None
+
+
+def test_sign_in_refusal_names_the_gotrue_msg_envelope():
+    """Current GoTrue answers 400 with ``msg`` + ``error_code``; the refusal
+    must carry that text, not a bare "refused"."""
+    def transport(method, url, headers, body):
+        return 400, b'{"code":400,"error_code":"email_not_confirmed","msg":"Email not confirmed"}'
+    client = PoolClient("https://x.supabase.co", "anon", transport=transport)
+    with pytest.raises(PoolAuthError, match="Email not confirmed"):
+        client.sign_in_password("a@x.io", "pw")
