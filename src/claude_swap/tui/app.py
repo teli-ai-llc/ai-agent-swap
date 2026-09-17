@@ -444,6 +444,12 @@ class CswapApp(App):
         self._start_action("Pool status", do_status, show_output=True)
 
     def open_pool_share(self, number: str) -> None:
+        """Look up the slot's current pool row, then push the share modal.
+
+        The lookup (``get_account``) is a real network call with a 10s
+        timeout, so it runs on a worker thread — never on the UI loop — and
+        the modal is pushed only once the prefill is known.
+        """
         snap = self.snapshot
         acc = next(
             (a for a in (snap.accounts if snap else ()) if a.number == number), None
@@ -453,36 +459,44 @@ class CswapApp(App):
             if acc is not None
             else number
         )
-        current = self._pool_share_current(number)
+        self.run_worker(
+            partial(self._pool_share_prefill_blocking, number, label),
+            thread=True,
+            group="pool-prefill",
+            exit_on_error=False,
+            name="pool share prefill",
+        )
+
+    def _pool_share_prefill_blocking(self, number: str, label: str) -> None:
+        """Worker body: the current pool row when this slot is already
+        published, or ``None`` (fresh publish defaults) otherwise or on
+        error; then hands off to the UI thread to push the modal."""
+        from claude_swap.pool.sync import build_sync
+
+        current: PoolShareForm | None = None
+        try:
+            sync = build_sync(self.switcher)
+            info = getattr(self.switcher, "slot_pool_info", None)
+            if sync is not None and info is not None:
+                account_id, _owned = info(number)
+                if account_id:
+                    row = sync.client.get_account(sync.session, account_id)
+                    if row is not None:
+                        current = PoolShareForm(
+                            shared=row.shared,
+                            swap_limit=row.share_swap_limit,
+                            hard_limit=row.share_hard_limit,
+                        )
+        except Exception:
+            current = None
+        self.call_from_thread(self._open_pool_share_modal, number, label, current)
+
+    def _open_pool_share_modal(
+        self, number: str, label: str, current: PoolShareForm | None
+    ) -> None:
         self.push_screen(
             PoolShareModal(number, label, current),
             partial(self._on_pool_share_form, number),
-        )
-
-    def _pool_share_current(self, number: str) -> PoolShareForm | None:
-        """Prefill from the pool's current row when this slot is already
-        published; ``None`` (fresh publish defaults) otherwise or on error."""
-        from claude_swap.pool.sync import build_sync
-
-        try:
-            sync = build_sync(self.switcher)
-            if sync is None:
-                return None
-            info = getattr(self.switcher, "slot_pool_info", None)
-            if info is None:
-                return None
-            account_id, _owned = info(number)
-            if not account_id:
-                return None
-            row = sync.client.get_account(sync.session, account_id)
-        except Exception:
-            return None
-        if row is None:
-            return None
-        return PoolShareForm(
-            shared=row.shared,
-            swap_limit=row.share_swap_limit,
-            hard_limit=row.share_hard_limit,
         )
 
     def _on_pool_share_form(self, number: str, form: PoolShareForm | None) -> None:
@@ -502,11 +516,11 @@ class CswapApp(App):
                 swap_limit=form.swap_limit,
                 hard_limit=form.hard_limit,
             )
-            print(f"{'Shared' if row.shared else 'Published (private)'} {row.email}")
-            if row.share_swap_limit:
-                print(f"  swap {row.share_swap_limit:g}")
-            if row.share_hard_limit:
-                print(f"  hard {row.share_hard_limit:g}")
+            print(
+                f"{'Shared' if row.shared else 'Published (private)'} {row.email}"
+                + (f"  swap {row.share_swap_limit:g}" if row.share_swap_limit else "")
+                + (f"  hard {row.share_hard_limit:g}" if row.share_hard_limit else "")
+            )
 
         self._start_action(f"Publish account {number}", do_publish, show_output=True)
 

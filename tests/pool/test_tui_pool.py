@@ -437,6 +437,7 @@ class TestPoolShareAction:
             await menu_select(pilot, "pool-menu")
             await menu_select(pilot, "pool-share-menu")
             await menu_select(pilot, "pool-share:1")
+            await settle(pilot)  # the prefill lookup runs on a worker
             assert isinstance(app.screen, PoolShareModal)
             app.screen.query_one("#swap", Input).value = "80"
             app.screen.query_one("#hard", Input).value = "50"
@@ -444,7 +445,79 @@ class TestPoolShareAction:
             await settle(pilot)
             assert calls == [("1", True, 80.0, 50.0)]
             assert isinstance(app.screen, OutputModal)
-            assert "user1@example.com" in _output_text(app)
+            # One line, exactly as the CLI's `cswap pool share` prints it.
+            assert _output_text(app) == "Shared user1@example.com  swap 80  hard 50"
+
+    async def test_share_prefills_from_the_published_row(self, tmp_path, monkeypatch):
+        # `open_pool_share` must look the row up on a worker thread, not the
+        # UI loop: `get_account` is a real network call with a 10s timeout.
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+
+        class StubClient:
+            def get_account(self, session, account_id):
+                assert account_id == "row-1"
+                return SimpleNamespace(
+                    shared=False, share_swap_limit=70.0, share_hard_limit=40.0
+                )
+
+        class StubSync:
+            client = StubClient()
+            session = object()
+
+        monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
+
+        fake = PoolAwareFakeSwitcher(
+            [make_account(1, active=True)],
+            tmp_path,
+            pool_info={"1": ("row-1", True)},
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-share-menu")
+            await menu_select(pilot, "pool-share:1")
+            await settle(pilot)
+            await pilot.pause()
+            await pilot.pause()
+            assert isinstance(app.screen, PoolShareModal)
+            assert app.screen.query_one("#shared", Checkbox).value is False
+            assert app.screen.query_one("#swap", Input).value == "70"
+            assert app.screen.query_one("#hard", Input).value == "40"
+
+    async def test_share_opens_with_fresh_defaults_when_lookup_fails(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+
+        class StubClient:
+            def get_account(self, session, account_id):
+                raise RuntimeError("pool unreachable")
+
+        class StubSync:
+            client = StubClient()
+            session = object()
+
+        monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
+
+        fake = PoolAwareFakeSwitcher(
+            [make_account(1, active=True)],
+            tmp_path,
+            pool_info={"1": ("row-1", True)},
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-share-menu")
+            await menu_select(pilot, "pool-share:1")
+            await settle(pilot)
+            await pilot.pause()
+            await pilot.pause()
+            assert isinstance(app.screen, PoolShareModal)
+            assert app.screen.query_one("#shared", Checkbox).value is True
+            assert app.screen.query_one("#swap", Input).value == ""
+            assert app.screen.query_one("#hard", Input).value == ""
 
 
 class TestPoolWithdrawAction:
