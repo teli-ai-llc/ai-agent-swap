@@ -634,6 +634,8 @@ def run(switcher) -> int:
                     self._last_usage_log[num] = key
 
         def on_refresh_tick(self, _timer):
+            from claude_swap.pool.sync import run_pass_quietly
+            run_pass_quietly(self.switcher)
             self.refresh_async()
 
         def on_sync_tick(self, _timer):

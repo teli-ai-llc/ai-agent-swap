@@ -839,6 +839,7 @@ Defaults live in settings.json in the backup root; flags override them.
     args = parser.parse_args(argv)
 
     from claude_swap.autoswitch import AutoSwitchEngine, AutoSwitchEvent
+    from claude_swap.pool.sync import run_pass_quietly
     from claude_swap.printer import accent, yellowed
     from claude_swap.settings import load_settings, merged_with_cli
 
@@ -869,6 +870,7 @@ Defaults live in settings.json in the backup root; flags override them.
             settings,
             jsonl_emit if args.json else human_emit,
             dry_run=args.dry_run,
+            pre_tick=lambda: run_pass_quietly(switcher),
         )
 
         if args.once:

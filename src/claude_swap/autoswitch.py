@@ -671,6 +671,7 @@ class AutoSwitchEngine:
         dry_run: bool = False,
         state_path: Path | None = None,
         clock: Callable[[], float] = time.time,
+        pre_tick: Callable[[], None] | None = None,
     ):
         self.switcher = switcher
         self.settings = settings
@@ -692,6 +693,7 @@ class AutoSwitchEngine:
         self.dry_run = dry_run
         self.state_path = state_path or (switcher.backup_dir / STATE_FILENAME)
         self.clock = clock
+        self._pre_tick = pre_tick
         self._stop = threading.Event()
         # Cuts the current inter-tick sleep short (a session threshold change
         # from the TUI should show a fresh decision now, not next interval).
@@ -996,6 +998,11 @@ class AutoSwitchEngine:
             return TickOutcome.ERROR
 
     def _tick_inner(self) -> TickOutcome:
+        if self._pre_tick is not None:
+            try:
+                self._pre_tick()
+            except Exception as e:
+                self._emit(ErrorEvent(message=f"{type(e).__name__}: {e}", transient=True))
         self._sleep_until_ts = None
         self._blocked_wait_long = False
         self._idle_hold_slow = False

@@ -178,6 +178,9 @@ class CswapApp(App):
     def _refresh_blocking(
         self, generation: int, lane: str, full: bool, store_only: bool
     ) -> None:
+        if lane == "normal" and not store_only:
+            from claude_swap.pool.sync import run_pass_quietly
+            run_pass_quietly(self.switcher)
         snap = self.source.take(full=full, store_only=store_only)
         self.call_from_thread(self._apply_snapshot, generation, lane, snap)
 

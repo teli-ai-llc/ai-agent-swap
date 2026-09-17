@@ -295,11 +295,14 @@ class AutoScreen(Screen):
     # -- engine -------------------------------------------------------------
 
     def _start_engine(self, *, dry_run: bool) -> None:
+        from claude_swap.pool.sync import run_pass_quietly
+
         engine = AutoSwitchEngine(
             self.app.switcher,
             self._settings,
             self._emit_from_thread,
             dry_run=dry_run,
+            pre_tick=lambda: run_pass_quietly(self.app.switcher),
         )
         self._engine = engine
         self.run_worker(
