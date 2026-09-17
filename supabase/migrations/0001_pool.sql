@@ -85,18 +85,15 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- A newer credential heals the row; owner-only columns stay owner-only.
+-- Ownership checks run against the status the client sent; the version heal is applied afterwards,
+-- so a newer credential from any member clears needs_relogin.
 create or replace function public.pool_accounts_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
   is_owner boolean := (auth.uid() = old.owner_user_id);
   is_admin boolean := public.pool_is_admin();
 begin
-  if new.credential_version > old.credential_version then
-    new.status := 'ok';
-    new.needs_relogin_since := null;
-    new.needs_relogin_reported_by := null;
-    new.updated_by_user_id := auth.uid();
-  elsif new.credential_version < old.credential_version then
+  if new.credential_version < old.credential_version then
     raise exception 'pool: stale credential version (% < %)', new.credential_version, old.credential_version
       using errcode = 'check_violation';
   end if;
@@ -115,6 +112,13 @@ begin
     if new.status <> old.status and not (new.status = 'needs_relogin' and old.status = 'ok') then
       raise exception 'pool: only the owner may set status %', new.status using errcode = 'insufficient_privilege';
     end if;
+  end if;
+
+  if new.credential_version > old.credential_version then
+    new.status := 'ok';
+    new.needs_relogin_since := null;
+    new.needs_relogin_reported_by := null;
+    new.updated_by_user_id := auth.uid();
   end if;
 
   if new.status = 'needs_relogin' and old.status <> 'needs_relogin' then

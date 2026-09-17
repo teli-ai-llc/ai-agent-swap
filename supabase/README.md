@@ -16,7 +16,7 @@ One Supabase project per pool. The repo's `.mcp.json` is scoped to the
 
 Rules enforced by the database, not by cswap:
 - a push with a lower `credential_version` than the row is rejected;
-- a push with a higher version clears `needs_relogin`;
+- a push with a higher version clears `needs_relogin`, whoever pushes it;
 - only the owner (or an admin) changes `shared`, the limits, or withdraws;
 - any member may flag a shared row `needs_relogin`;
 - a member only inserts usage events and machines as themselves.
