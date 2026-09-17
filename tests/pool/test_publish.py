@@ -65,6 +65,17 @@ class TestPublishSlot:
             sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None)
         assert s.slot_pool_info("1") == (None, False)
 
+    def test_reshare_after_unshare(self, owner_env, fake_pool):
+        s, client, session = owner_env
+        sync = PoolSync(s, client, session, machine_id=MID)
+        row = sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None)
+        sync.withdraw_slot("1")
+        assert fake_pool.row(row.id)["status"] == "withdrawn"
+        again = sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None)
+        assert again.id == row.id
+        assert fake_pool.row(row.id)["status"] == "ok"
+        assert fake_pool.row(row.id)["shared"] is True
+
     def test_withdraw(self, owner_env, fake_pool):
         s, client, session = owner_env
         sync = PoolSync(s, client, session, machine_id=MID)

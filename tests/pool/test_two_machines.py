@@ -150,6 +150,41 @@ def test_dead_lineage_flagged_by_borrower_and_healed_by_owner_readd(machines, fa
         assert not b.switcher._slot_token_dead("1", "h@x.io")
 
 
+def test_withdrawal_survives_a_borrower_rotation(machines, fake_pool):
+    a, b = machines
+    a.login_claude("h@x.io", "acct-h", "rt-1", 1_000)
+    a.add()
+    assert b.run().added == ["1"]
+    with b.active():
+        b.switcher.switch_to("1", json_output=True)
+    with a.active():
+        a.sync.withdraw_slot("1")
+    # B's Claude Code rotates the borrowed (now server-side withdrawn) login
+    b.login_claude("h@x.io", "acct-h", "rt-b", 2_000)
+    report = b.run()
+    assert fake_pool.rows()[0]["status"] == "withdrawn"
+    assert report.removed == ["1"]
+    with b.active():
+        assert "1" not in b.switcher._get_sequence_data()["accounts"]
+    report = a.run()
+    assert report.pulled == []
+    with a.active():
+        assert a.switcher.slot_pool_info("1") == (None, False)
+
+
+def test_unshare_then_share_relands_on_borrower(machines):
+    a, b = machines
+    a.login_claude("h@x.io", "acct-h", "rt-1", 1_000)
+    a.add()
+    b.run()
+    with a.active():
+        a.sync.withdraw_slot("1")
+    assert b.run().removed == ["1"]
+    with a.active():
+        a.sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None)
+    assert b.run().added == ["1"]
+
+
 def test_withdrawal_removes_borrowed_copy(machines):
     a, b = machines
     a.login_claude("h@x.io", "acct-h", "rt-1", 1_000)

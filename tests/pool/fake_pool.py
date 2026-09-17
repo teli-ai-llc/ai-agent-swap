@@ -238,10 +238,11 @@ class FakePool:
                 return 403, b'{"code":"42501","message":"pool: only the owner may set status"}'
 
         if new["credential_version"] > old["credential_version"]:
-            new["status"] = "ok"
-            new["needs_relogin_since"] = None
-            new["needs_relogin_reported_by"] = None
             new["updated_by_user_id"] = user_id
+            if old["status"] == "needs_relogin":
+                new["status"] = "ok"
+                new["needs_relogin_since"] = None
+                new["needs_relogin_reported_by"] = None
 
         if new["status"] == "needs_relogin" and old["status"] != "needs_relogin":
             new["needs_relogin_since"] = new.get("needs_relogin_since") or _now_iso()

@@ -377,6 +377,8 @@ class PoolSync:
         else:
             self.client.update_sharing(self.session, row.id, shared=shared,
                                        swap_limit=swap_limit, hard_limit=hard_limit)
+            if row.status != "ok":
+                self.client.set_status(self.session, row.id, "ok", self.machine_id)
             self.client.push_credential(self.session, row.id, blob, blob_version(blob),
                                         blob_fingerprint(blob), self.machine_id)
             row = self.client.get_account(self.session, row.id) or row

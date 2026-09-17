@@ -84,9 +84,13 @@ language sql stable security definer set search_path = public as $$
   select exists (select 1 from public.pool_members where user_id = auth.uid() and role = 'admin');
 $$;
 
--- A newer credential heals the row; owner-only columns stay owner-only.
--- Ownership checks run against the status the client sent; the version heal is applied afterwards,
--- so a newer credential from any member clears needs_relogin.
+-- A newer credential always records its pusher as updated_by_user_id, and
+-- heals a row that needed re-login; owner-only columns stay owner-only.
+-- Ownership checks run against the status the client sent; the version heal
+-- is applied afterwards, so a newer credential from any member clears
+-- needs_relogin -- but never resurrects a withdrawn row: a push still lands
+-- (credential columns update, updated_at refreshes), but status stays
+-- withdrawn so the pusher's next pull sees the withdrawal and removes its slot.
 create or replace function public.pool_accounts_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
@@ -115,10 +119,12 @@ begin
   end if;
 
   if new.credential_version > old.credential_version then
-    new.status := 'ok';
-    new.needs_relogin_since := null;
-    new.needs_relogin_reported_by := null;
     new.updated_by_user_id := auth.uid();
+    if old.status = 'needs_relogin' then
+      new.status := 'ok';
+      new.needs_relogin_since := null;
+      new.needs_relogin_reported_by := null;
+    end if;
   end if;
 
   if new.status = 'needs_relogin' and old.status <> 'needs_relogin' then
@@ -165,7 +171,8 @@ create policy members_read_accounts on public.pool_accounts for select to authen
 create policy members_insert_own_accounts on public.pool_accounts for insert to authenticated
   with check (owner_user_id = auth.uid() or public.pool_is_admin());
 create policy members_update_visible_accounts on public.pool_accounts for update to authenticated
-  using (shared or owner_user_id = auth.uid() or public.pool_is_admin());
+  using (shared or owner_user_id = auth.uid() or public.pool_is_admin())
+  with check (shared or owner_user_id = auth.uid() or public.pool_is_admin());
 
 create policy members_read_machines on public.pool_machines for select to authenticated using (true);
 create policy members_write_own_machines on public.pool_machines for all to authenticated
