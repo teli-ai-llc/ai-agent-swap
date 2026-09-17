@@ -328,3 +328,62 @@ class PoolSync:
                     attention.append({"email": email, "since": row.needs_relogin_since,
                                       "reportedBy": row.needs_relogin_reported_by})
         state["attention"] = attention
+
+    # -- sharing (Task 11) ---------------------------------------------------------
+    def publish_slot(self, num: str, *, shared: bool, swap_limit: float | None,
+                     hard_limit: float | None) -> PoolAccountRow:
+        raise PoolError("publish_slot: implemented in Task 11")
+
+    def withdraw_slot(self, num: str) -> None:
+        raise PoolError("withdraw_slot: implemented in Task 11")
+
+
+def build_sync(switcher, *, transport=None) -> PoolSync | None:
+    """A PoolSync for this machine, or None when not logged in or disabled."""
+    from claude_swap.pool.session import load_session, machine_id
+    from claude_swap.settings import load_pool_settings
+
+    settings = load_pool_settings(switcher.backup_dir)
+    if not settings.enabled:
+        return None
+    session = load_session(switcher.backup_dir)
+    if session is None:
+        return None
+    client = PoolClient(session.url, session.anon_key, transport=transport)
+    return PoolSync(switcher, client, session, machine_id=machine_id(switcher.backup_dir))
+
+
+_last_quiet_warning: dict[str, float] = {}
+
+
+def run_pass_quietly(switcher, *, force: bool = False) -> PassReport | None:
+    """One pass for poll surfaces: never raises, paced by pool.pollIntervalSeconds.
+
+    Returns None when there is no pool on this machine or the pace says wait.
+    A skipped pass (unreachable, refused session) is logged at most once per
+    ten minutes per reason so a long outage does not flood the log.
+    """
+    from claude_swap.settings import load_pool_settings
+
+    try:
+        sync = build_sync(switcher)
+        if sync is None:
+            return None
+        if not force:
+            state = load_state(switcher.backup_dir)
+            last = state.get("lastPassAt")
+            interval = load_pool_settings(switcher.backup_dir).poll_interval_seconds
+            if isinstance(last, (int, float)) and time.time() - last < interval:
+                return None
+        report = sync.run_pass()
+    except Exception as e:  # pragma: no cover - the safety net the spec demands
+        _logger.warning("pool pass failed: %s: %s", type(e).__name__, e)
+        return None
+    if report.skipped:
+        now = time.time()
+        if now - _last_quiet_warning.get(report.skipped, 0) > 600:
+            _logger.warning("pool: %s", report.skipped)
+            _last_quiet_warning[report.skipped] = now
+    for err in report.errors:
+        _logger.warning("pool: %s", err)
+    return report
