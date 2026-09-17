@@ -297,7 +297,12 @@ def sync_command(argv: list[str]) -> None:
     print(dimmed(f"Syncing every {interval:g}s; Ctrl-C to stop"))
     try:
         while True:
-            one_pass()
+            try:
+                one_pass()
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:  # a failing pass never kills the loop
+                print_warning(f"sync pass failed: {type(e).__name__}: {e}")
             time.sleep(interval)
             interval = load_pool_settings(switcher.backup_dir).poll_interval_seconds
     except KeyboardInterrupt:

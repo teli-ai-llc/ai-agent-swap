@@ -69,6 +69,30 @@ class TestLoop:
         assert info.value.code == 0
         assert ticks == [30.0, 30.0]
 
+    def test_loop_survives_a_failing_pass(self, logged_in, monkeypatch, capsys):
+        from claude_swap.pool import cli
+        ticks = []
+        call_count = [0]
+
+        def failing_build_sync(switcher):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise RuntimeError("boom")
+            return None
+
+        def fake_sleep(seconds):
+            ticks.append(seconds)
+            if len(ticks) == 2:
+                raise KeyboardInterrupt
+        monkeypatch.setattr(cli, "build_sync", failing_build_sync)
+        monkeypatch.setattr("time.sleep", fake_sleep)
+        with pytest.raises(SystemExit) as info:
+            _run(["sync"])
+        assert info.value.code == 0
+        output = capsys.readouterr().out
+        assert "sync pass failed: RuntimeError: boom" in output
+        assert "Not logged in" in output
+
 
 class TestService:
     def test_install_uses_sync_label(self, logged_in, monkeypatch):
