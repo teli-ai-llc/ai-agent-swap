@@ -5,19 +5,9 @@ from __future__ import annotations
 import pytest
 
 from claude_swap.pool.sync import PoolSync, load_state
-from claude_swap.usage_store import FetchRecord
-from tests.pool.conftest import _publish_row, _seed
+from tests.pool.conftest import _mark_dead, _publish_row, _seed
 
 MID = "11111111-1111-1111-1111-111111111111"
-
-
-def _mark_dead(s, num, email, org=""):
-    """Put the slot into the usage store's quarantined state the way the
-    collectors do: strike it against its stored fingerprint."""
-    from claude_swap.oauth import credential_fingerprint
-    fp = credential_fingerprint(s._read_account_credentials(num, email))
-    s._usage_store.record({num: FetchRecord(error="invalid_grant", struck_fp=fp)}, {num: (email, org)})
-    assert s._slot_token_dead(num, email)
 
 
 class TestStatus:

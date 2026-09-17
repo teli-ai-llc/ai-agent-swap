@@ -5,9 +5,11 @@ import json
 import pytest
 
 from claude_swap.models import Platform
+from claude_swap.oauth import credential_fingerprint
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import save_session
 from claude_swap.switcher import ClaudeAccountSwitcher
+from claude_swap.usage_store import FetchRecord
 from tests.pool.fake_pool import FakePool
 
 
@@ -53,6 +55,14 @@ def _seed(s, num, email, uuid, rt, exp, *, pool_id=None, owned=False):
     s._write_json(s.sequence_file, data)
     if pool_id:
         s.set_slot_pool_info(num, pool_id, owned)
+
+
+def _mark_dead(s, num, email, org=""):
+    """Put the slot into the usage store's quarantined state the way the
+    collectors do: strike it against its stored fingerprint."""
+    fp = credential_fingerprint(s._read_account_credentials(num, email))
+    s._usage_store.record({num: FetchRecord(error="invalid_grant", struck_fp=fp)}, {num: (email, org)})
+    assert s._slot_token_dead(num, email)
 
 
 def _publish_row(fake_pool, client, owner, uuid, rt, exp, shared=True):
