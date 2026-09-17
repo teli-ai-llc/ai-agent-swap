@@ -138,6 +138,32 @@ class TestPoolLoginModal:
             error = screen.query_one("#form-error", Static).render()
             assert str(getattr(error, "plain", error)) != ""
 
+    async def test_password_is_returned_verbatim_not_stripped(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[PoolLoginForm | None] = []
+            app.push_screen(
+                PoolLoginModal("https://pool.example.com", "anon-key-123"),
+                results.append,
+            )
+            await pilot.pause()
+            screen = pilot.app.screen
+            screen.query_one("#url", Input).value = "https://pool.example.com/"
+            screen.query_one("#anon-key", Input).value = "anon-key-123"
+            screen.query_one("#email", Input).value = "member@example.com"
+            screen.query_one("#password", Input).value = " sp ace "
+            await pilot.click("#login")
+            await pilot.pause()
+            assert results == [
+                PoolLoginForm(
+                    url="https://pool.example.com",
+                    anon_key="anon-key-123",
+                    email="member@example.com",
+                    password=" sp ace ",
+                )
+            ]
+
 
 class TestPoolShareModal:
     async def test_returns_form_for_valid_input(self, tmp_path):
@@ -231,6 +257,45 @@ class TestPoolShareModal:
             await pilot.pause()
             assert results == [PoolShareForm(True, 80.0, None)]
 
+    async def test_off_is_typable_into_the_hard_limit_field(self, tmp_path):
+        # Regression: `type="number"` on the Input silently swallowed every
+        # keystroke that wasn't a digit, so "off" could never actually be
+        # typed even though the field's placeholder documents it.
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[PoolShareForm | None] = []
+            app.push_screen(
+                PoolShareModal("1", "user1@example.com", None), results.append
+            )
+            await pilot.pause()
+            screen = pilot.app.screen
+            screen.query_one("#hard", Input).focus()
+            await pilot.pause()
+            for ch in "off":
+                await pilot.press(ch)
+            await pilot.pause()
+            assert screen.query_one("#hard", Input).value == "off"
+            await pilot.click("#publish")
+            await pilot.pause()
+            assert results == [PoolShareForm(True, None, None)]
+
+    async def test_hard_limit_100_means_none(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[PoolShareForm | None] = []
+            app.push_screen(
+                PoolShareModal("1", "user1@example.com", None), results.append
+            )
+            await pilot.pause()
+            screen = pilot.app.screen
+            screen.query_one("#swap", Input).value = "80"
+            screen.query_one("#hard", Input).value = "100"
+            await pilot.click("#publish")
+            await pilot.pause()
+            assert results == [PoolShareForm(True, 80.0, None)]
+
 
 # ---------------------------------------------------------------------------
 # menu, dispatch, actions
@@ -312,6 +377,12 @@ class TestPoolMenu:
             await menu_select(pilot, "pool-menu")
             await menu_select(pilot, "pool-withdraw-menu")
             assert _menu_ids(app) == ["back"]
+            menu = app.screen.query_one("#menu", ListView)
+            item = next(
+                it for it in menu.query(MenuItem) if it.action_id == "back"
+            )
+            label = item.query_one(Static).render().plain
+            assert "(no owned pooled accounts)" in label
 
     async def test_pool_logout_menu_entries(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
@@ -321,7 +392,7 @@ class TestPoolMenu:
             await settle(pilot)
             await menu_select(pilot, "pool-menu")
             await menu_select(pilot, "pool-logout-menu")
-            assert _menu_ids(app) == ["pool-logout:remove", "pool-logout:keep", "back"]
+            assert _menu_ids(app) == ["pool-logout:keep", "pool-logout:remove", "back"]
 
 
 class TestPoolLoginAction:
@@ -389,6 +460,53 @@ class TestPoolLoginAction:
             assert isinstance(app.screen, PoolLoginModal)
             assert app.screen.query_one("#url", Input).value == "https://saved.example.com"
             assert app.screen.query_one("#anon-key", Input).value == "saved-key"
+
+    async def test_submenu_refreshes_after_a_successful_login(self, tmp_path, monkeypatch):
+        # Before a fix, the submenu's entries were computed only when it was
+        # pushed, so a login that flips `pool_logged_in` from False to True
+        # left the stale "Log in…"/"Back" pair showing on re-entry.
+        state = {"logged_in": False}
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: state["logged_in"])
+
+        def fake_login(switcher, url, anon_key, email, password):
+            state["logged_in"] = True
+            return pool_cli.LoginResult(
+                email=email,
+                role="member",
+                report=pool_sync.PassReport(pushed=["1"]),
+                suggest_strikes=False,
+            )
+
+        monkeypatch.setattr(pool_cli, "login_pool", fake_login)
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-login")
+            assert isinstance(app.screen, PoolLoginModal)
+            app.screen.query_one("#url", Input).value = "https://pool.example.com"
+            app.screen.query_one("#anon-key", Input).value = "anon-key-123"
+            app.screen.query_one("#email", Input).value = "member@example.com"
+            app.screen.query_one("#password", Input).value = "hunter2"
+            await pilot.click("#login")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            await pilot.press("enter")  # close the output modal
+            await settle(pilot)
+            # back on the dashboard, at the root menu (not the stale "pool" one)
+            assert app.screen.query_one("#menu-title", Static).render().plain == "menu"
+            await menu_select(pilot, "pool-menu")
+            assert _menu_ids(app) == [
+                "pool-status",
+                "pool-share-menu",
+                "pool-withdraw-menu",
+                "pool-sync",
+                "pool-defaults",
+                "pool-logout-menu",
+                "back",
+            ]
 
 
 class TestPoolStatusAction:
@@ -600,6 +718,41 @@ class TestPoolSyncNowAction:
             await settle(pilot)
             assert any("pulled 1 update" in msg for msg in notified)
 
+    async def test_sync_now_skipped_when_not_logged_in(self, tmp_path, monkeypatch):
+        # The menu opens while logged in (so "Sync now" is reachable at
+        # all), but the session ends before the action itself runs.
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        notified = []
+        app.notify = lambda msg, *a, **kw: notified.append(msg)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+            await menu_select(pilot, "pool-sync")
+            await settle(pilot)
+            assert any(msg == "skipped: not logged in" for msg in notified)
+
+    async def test_sync_now_skipped_when_the_pass_returns_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        monkeypatch.setattr(
+            pool_sync, "run_pass_quietly", lambda switcher, force=False: None
+        )
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        notified = []
+        app.notify = lambda msg, *a, **kw: notified.append(msg)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-sync")
+            await settle(pilot)
+            assert any(
+                msg == "skipped: pool disabled or the pass failed (see the log)"
+                for msg in notified
+            )
+
 
 class TestPoolDefaultsAction:
     async def test_defaults_applies_and_notifies(self, tmp_path, monkeypatch):
@@ -618,7 +771,9 @@ class TestPoolDefaultsAction:
 
 
 class TestPoolLogoutAction:
-    async def test_logout_remove_calls_logout_pool_with_keep_false(self, tmp_path, monkeypatch):
+    async def test_logout_remove_confirms_then_calls_logout_pool_with_keep_false(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
         calls = []
 
@@ -634,10 +789,35 @@ class TestPoolLogoutAction:
             await menu_select(pilot, "pool-menu")
             await menu_select(pilot, "pool-logout-menu")
             await menu_select(pilot, "pool-logout:remove")
+            assert isinstance(app.screen, ConfirmModal)
+            assert calls == []  # not called until confirmed
+            await pilot.press("y")
             await settle(pilot)
             assert calls == [False]
 
-    async def test_logout_keep_calls_logout_pool_with_keep_true(self, tmp_path, monkeypatch):
+    async def test_logout_remove_cancel_is_safe(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        calls = []
+
+        def fake_logout(switcher, *, keep):
+            calls.append(keep)
+            return pool_cli.LogoutResult(removed=["1"], kept=[], unlinked=[])
+
+        monkeypatch.setattr(pool_cli, "logout_pool", fake_logout)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-logout-menu")
+            await menu_select(pilot, "pool-logout:remove")
+            await pilot.press("n")
+            await settle(pilot)
+            assert calls == []
+
+    async def test_logout_keep_calls_logout_pool_with_keep_true_no_confirm(
+        self, tmp_path, monkeypatch
+    ):
         monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
         calls = []
 
@@ -655,3 +835,30 @@ class TestPoolLogoutAction:
             await menu_select(pilot, "pool-logout:keep")
             await settle(pilot)
             assert calls == [True]
+
+    async def test_submenu_refreshes_after_a_successful_logout(self, tmp_path, monkeypatch):
+        # Mirror of the login case: after a logout flips `pool_logged_in`
+        # from True to False, re-entering "Pool…" must show the logged-out
+        # submenu, not the stale seven-entry one.
+        state = {"logged_in": True}
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: state["logged_in"])
+
+        def fake_logout(switcher, *, keep):
+            state["logged_in"] = False
+            return pool_cli.LogoutResult(removed=[], kept=[], unlinked=["1"])
+
+        monkeypatch.setattr(pool_cli, "logout_pool", fake_logout)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-logout-menu")
+            await menu_select(pilot, "pool-logout:keep")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            await pilot.press("enter")  # close the output modal
+            await settle(pilot)
+            assert app.screen.query_one("#menu-title", Static).render().plain == "menu"
+            await menu_select(pilot, "pool-menu")
+            assert _menu_ids(app) == ["pool-login", "back"]

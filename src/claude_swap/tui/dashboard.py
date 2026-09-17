@@ -214,8 +214,8 @@ class DashboardScreen(Screen):
 
     def _pool_logout_entries(self) -> MenuEntries:
         return [
-            ("Log out, remove borrowed accounts", "pool-logout:remove"),
             ("Log out, keep borrowed accounts", "pool-logout:keep"),
+            ("Log out, remove borrowed accounts", "pool-logout:remove"),
             _BACK,
         ]
 
@@ -237,6 +237,12 @@ class DashboardScreen(Screen):
         if len(self._menu_stack) > 1:
             self._menu_stack.pop()
             await self._render_menu()
+
+    async def _pop_menu_to_root(self) -> None:
+        """Unwind back to the root menu so re-entering a submenu recomputes
+        its entries (e.g. after a pool login/logout changes the login state)."""
+        while len(self._menu_stack) > 1:
+            await self._pop_menu()
 
     async def _render_menu(self) -> None:
         title, entries = self._menu_stack[-1]
@@ -300,6 +306,7 @@ class DashboardScreen(Screen):
         elif action_id == "pool-menu":
             await self._push_menu("pool", self._pool_entries())
         elif action_id == "pool-login":
+            await self._pop_menu_to_root()
             app.action_pool_login()
         elif action_id == "pool-status":
             app.action_pool_status()
@@ -326,11 +333,11 @@ class DashboardScreen(Screen):
         elif action_id == "pool-logout-menu":
             await self._push_menu("log out", self._pool_logout_entries())
         elif action_id == "pool-logout:keep":
+            await self._pop_menu_to_root()
             app.action_pool_logout(keep=True)
-            await self._pop_menu()
         elif action_id == "pool-logout:remove":
+            await self._pop_menu_to_root()
             app.action_pool_logout(keep=False)
-            await self._pop_menu()
         else:
             actions[action_id]()
 

@@ -314,8 +314,8 @@ class PoolLoginModal(ModalScreen["PoolLoginForm | None"]):
         url = self.query_one("#url", Input).value.strip().rstrip("/")
         anon_key = self.query_one("#anon-key", Input).value.strip()
         email = self.query_one("#email", Input).value.strip()
-        password = self.query_one("#password", Input).value.strip()
-        if not (url and anon_key and email and password):
+        password = self.query_one("#password", Input).value
+        if not (url and anon_key and email) or not password.strip():
             self.query_one("#form-error", Static).update(
                 "URL, anon key, email, and password are all required."
             )
@@ -390,13 +390,11 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
                 value=swap_value,
                 placeholder="swap limit % (blank = none)",
                 id="swap",
-                type="number",
             )
             yield Input(
                 value=hard_value,
                 placeholder="hard limit % (blank = none)",
                 id="hard",
-                type="number",
             )
             yield Static("", id="form-error", classes="form-error")
             with Horizontal(classes="modal-buttons"):
@@ -432,6 +430,10 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
                 if hard_norm in ("", "off", "default", "none")
                 else parse_hard_limit(hard_raw)
             )
+            # A parsed hard limit of exactly 100 means "no limit" (matches
+            # the CLI's `cswap pool share --hard-limit 100`).
+            if hard_limit == 100.0:
+                hard_limit = None
         except ValueError as exc:
             self.query_one("#form-error", Static).update(str(exc))
             return

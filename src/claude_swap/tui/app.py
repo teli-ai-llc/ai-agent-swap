@@ -553,12 +553,16 @@ class CswapApp(App):
 
     def action_pool_sync_now(self) -> None:
         def do_sync() -> None:
-            from claude_swap.pool.cli import describe_report
-            from claude_swap.pool.sync import PassReport, run_pass_quietly
+            from claude_swap.pool.cli import describe_report, pool_logged_in
+            from claude_swap.pool.sync import run_pass_quietly
 
-            report = run_pass_quietly(self.switcher, force=True) or PassReport(
-                skipped="not logged in"
-            )
+            if not pool_logged_in(self.switcher):
+                print("skipped: not logged in")
+                return
+            report = run_pass_quietly(self.switcher, force=True)
+            if report is None:
+                print("skipped: pool disabled or the pass failed (see the log)")
+                return
             print(describe_report(report))
 
         self._start_action("Sync now", do_sync)
@@ -575,6 +579,38 @@ class CswapApp(App):
         self._start_action("Pooled-machine defaults", do_defaults)
 
     def action_pool_logout(self, keep: bool) -> None:
+        if keep:
+            self._do_pool_logout(keep=True)
+            return
+        count = self._borrowed_pool_account_count()
+        self.push_screen(
+            ConfirmModal(
+                f"Remove {count} borrowed account(s) from this machine and log out?",
+                title="Log out of the pool",
+                yes_label="Log out",
+            ),
+            self._on_pool_logout_confirm,
+        )
+
+    def _on_pool_logout_confirm(self, confirmed: bool | None) -> None:
+        if confirmed:
+            self._do_pool_logout(keep=False)
+
+    def _borrowed_pool_account_count(self) -> int:
+        """Slots on this machine linked to the pool but owned by someone
+        else — what a "remove borrowed accounts" logout would drop."""
+        snap = self.snapshot
+        info = getattr(self.switcher, "slot_pool_info", None)
+        if info is None or snap is None:
+            return 0
+        count = 0
+        for acc in snap.accounts:
+            account_id, owned = info(acc.number)
+            if account_id and not owned:
+                count += 1
+        return count
+
+    def _do_pool_logout(self, *, keep: bool) -> None:
         def do_logout() -> None:
             from claude_swap.pool.cli import logout_pool
 
