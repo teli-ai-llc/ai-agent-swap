@@ -53,3 +53,10 @@ def test_round_trip_against_real_project():
         assert client.get_account(session, row.id).status == "ok"
     finally:
         client.set_status(session, row.id, "withdrawn", str(uuid.uuid4()))
+    # A newer push onto a withdrawn row lands but never resurrects it (guard
+    # trigger heals only from needs_relogin); this is where the fake pool and
+    # real Postgres could most plausibly disagree, so it is checked live.
+    later = {**blob, "claudeAiOauth": {**blob["claudeAiOauth"], "refreshToken": "r4", "expiresAt": 4_000}}
+    assert client.push_credential(session, row.id, later, 4_000, "sha256:it4", str(uuid.uuid4())) is True
+    after = client.get_account(session, row.id)
+    assert after.status == "withdrawn" and after.credential_version == 4_000
