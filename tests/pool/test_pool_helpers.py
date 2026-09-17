@@ -1,0 +1,158 @@
+"""Unit tests for the pool helpers `_login`/`_logout`/`_status` delegate to."""
+
+from __future__ import annotations
+
+import pytest
+
+from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
+from claude_swap.pool import client as client_mod
+from claude_swap.pool.cli import (
+    apply_pooled_defaults,
+    login_pool,
+    logout_pool,
+    pool_logged_in,
+    status_lines,
+)
+from claude_swap.pool.session import load_session
+from claude_swap.settings import load_pool_settings, load_settings, set_setting
+from tests.pool.conftest import _publish_row, _switcher
+
+
+@pytest.fixture
+def wired(fake_pool, monkeypatch, temp_home):
+    """Route every PoolClient the helpers build through the fake pool."""
+    real_init = client_mod.PoolClient.__init__
+
+    def init(self, url, anon_key, *, transport=None, clock=None, timeout_s=10.0):
+        real_init(self, url, anon_key, transport=fake_pool, timeout_s=timeout_s)
+    monkeypatch.setattr(client_mod.PoolClient, "__init__", init)
+    return fake_pool
+
+
+class TestLoginPool:
+    def test_login_pool_returns_member_and_pulls(self, wired, owner, borrower):
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
+
+        result = login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+
+        assert result.email == "borrower@x.io"
+        assert result.role == "member"
+        assert result.report.added == ["1"]
+        assert load_session(s.backup_dir) is not None
+        settings = load_pool_settings(s.backup_dir)
+        assert settings.url == wired.base_url
+        assert settings.anon_key == wired.anon_key
+        assert wired.machines
+
+    def test_login_pool_bad_password_raises_auth_error(self, wired, owner):
+        s = _switcher()
+        with pytest.raises(PoolAuthError):
+            login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "wrong")
+
+    def test_login_pool_suggests_strikes_only_when_low(self, wired, owner):
+        s = _switcher()
+        result = login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        assert result.suggest_strikes is True
+
+        s2 = _switcher()
+        set_setting(s2.backup_dir, "autoswitch.deadTokenStrikes", "2")
+        result2 = login_pool(s2, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        assert result2.suggest_strikes is False
+
+
+class TestLogoutPool:
+    def test_logout_pool_remove_and_keep(self, wired, owner, borrower):
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
+        _publish_row(wired, client, owner, "acct-o2", "rt-2", 1_000)
+        _publish_row(wired, client, borrower, "acct-b", "rt-b", 1_000)
+        login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+
+        result = logout_pool(s, keep=False)
+        assert sorted(result.removed) == ["1", "2"]
+        assert result.kept == []
+        assert result.unlinked == ["3"]
+
+    def test_logout_pool_keep_unlinks_without_removing(self, wired, owner, borrower):
+        # keep=True never removes, even a slot that would otherwise be
+        # eligible for removal (a borrowed, non-owned slot).
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
+        _publish_row(wired, client, owner, "acct-o2", "rt-2", 1_000)
+        _publish_row(wired, client, borrower, "acct-b", "rt-b", 1_000)
+        login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+
+        result = logout_pool(s, keep=True)
+        assert result.removed == []
+        assert result.kept == []
+        assert sorted(result.unlinked) == ["1", "2", "3"]
+
+    def test_logout_pool_reports_kept_slot(self, wired, owner, borrower, monkeypatch):
+        s = _switcher()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
+        login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+
+        def fake_remove(identifier, assume_yes=False, quiet=False):
+            raise ClaudeSwitchError("live")
+        monkeypatch.setattr(s, "remove_account", fake_remove)
+
+        result = logout_pool(s, keep=False)
+        assert len(result.kept) == 1
+        num, email, reason = result.kept[0]
+        assert num == "1"
+        assert reason == "live"
+        assert load_session(s.backup_dir) is None
+
+    def test_logout_pool_when_logged_out_raises(self):
+        s = _switcher()
+        with pytest.raises(PoolError):
+            logout_pool(s, keep=False)
+
+
+class TestStatusLines:
+    def test_status_lines_logged_out_and_in(self, wired, owner):
+        s = _switcher()
+        lines = status_lines(s)
+        assert any("Not logged in" in line for line in lines)
+
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
+        login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+
+        from claude_swap.pool.sync import load_state, save_state
+
+        since = "2020-01-01T00:00:00Z"
+        state = load_state(s.backup_dir)
+        state["attention"] = [{"email": "acct-o@x.io", "since": since, "reportedBy": "m"}]
+        save_state(s.backup_dir, state)
+
+        lines = status_lines(s)
+        assert wired.base_url in lines[0]
+        assert "owner@x.io" in lines[0]
+        assert any("needs re-login" in line for line in lines)
+
+
+class TestApplyPooledDefaults:
+    def test_apply_pooled_defaults(self):
+        s = _switcher()
+        assert apply_pooled_defaults(s) is True
+        assert load_settings(s.backup_dir).dead_token_strikes == 2
+
+        assert apply_pooled_defaults(s) is False
+
+        set_setting(s.backup_dir, "autoswitch.deadTokenStrikes", "3")
+        assert apply_pooled_defaults(s) is False
+        assert load_settings(s.backup_dir).dead_token_strikes == 3
+
+
+class TestPoolLoggedIn:
+    def test_pool_logged_in(self, wired, owner):
+        s = _switcher()
+        assert pool_logged_in(s) is False
+        login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        assert pool_logged_in(s) is True

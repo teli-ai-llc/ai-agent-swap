@@ -8,14 +8,15 @@ import json
 import platform
 import sys
 import time
+from dataclasses import dataclass
 
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError, PoolError
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import clear_session, load_session, machine_id, save_session
-from claude_swap.pool.sync import PassReport, PoolSync, _ago, build_sync, load_state
-from claude_swap.printer import accent, bolded, dimmed, error as print_error, warning as print_warning
-from claude_swap.settings import load_pool_settings, set_setting
+from claude_swap.pool.sync import POOL_SCHEMA_VERSION, PassReport, PoolSync, _ago, build_sync, load_state
+from claude_swap.printer import accent, bolded, dimmed, error as print_error, warning as print_warning, yellowed
+from claude_swap.settings import load_pool_settings, load_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
 
 
@@ -48,6 +49,118 @@ def _print_report(report: PassReport) -> None:
     print(f"Sync: {describe_report(report)}")
     for err in report.errors:
         print_warning(f"  {err}")
+
+
+# -- pool helpers ------------------------------------------------------------------
+@dataclass(frozen=True)
+class LoginResult:
+    email: str
+    role: str
+    report: PassReport
+    suggest_strikes: bool          # True when autoswitch.deadTokenStrikes < 2
+
+
+@dataclass(frozen=True)
+class LogoutResult:
+    removed: list[str]             # slot numbers removed
+    kept: list[tuple[str, str, str]]   # (slot, email, reason) kept locally
+    unlinked: list[str]            # owned slots unlinked
+
+
+def login_pool(switcher: ClaudeAccountSwitcher, url: str, anon_key: str, email: str, password: str) -> LoginResult:
+    """Sign in, check schema, load the member row, register this machine,
+    save the session, persist pool.url/pool.anonKey, then run one sync pass.
+
+    Raises PoolError/PoolAuthError on any failure; nothing is persisted on
+    failure paths that raise before ``save_session``.
+    """
+    client = PoolClient(url, anon_key)
+    session = client.sign_in_password(email, password)
+    version = client.schema_version(session)
+    if version != POOL_SCHEMA_VERSION:
+        raise PoolError(f"pool schema is v{version}; this cswap speaks v{POOL_SCHEMA_VERSION}")
+    member = client.member(session)
+    client.register_machine(session, machine_id(switcher.backup_dir), platform.node(), __version__)
+
+    save_session(switcher.backup_dir, session)
+    set_setting(switcher.backup_dir, "pool.url", url)
+    set_setting(switcher.backup_dir, "pool.anonKey", anon_key)
+
+    sync = PoolSync(switcher, client, session, machine_id=machine_id(switcher.backup_dir))
+    report = sync.run_pass()
+    suggest_strikes = load_settings(switcher.backup_dir).dead_token_strikes < 2
+    return LoginResult(email=email, role=member["role"], report=report, suggest_strikes=suggest_strikes)
+
+
+def logout_pool(switcher: ClaudeAccountSwitcher, *, keep: bool) -> LogoutResult:
+    """Sign out; removes borrowed accounts unless ``keep``. Raises PoolError
+    when not currently logged in."""
+    if load_session(switcher.backup_dir) is None:
+        raise PoolError("not logged in to a pool")
+    data = switcher._get_sequence_data() or {}
+    removed: list[str] = []
+    kept: list[tuple[str, str, str]] = []
+    unlinked: list[str] = []
+    for num in sorted((data.get("accounts") or {}).keys(), key=int):
+        account_id, owned = switcher.slot_pool_info(num)
+        if not account_id:
+            continue
+        if owned or keep:
+            switcher.set_slot_pool_info(num, None, False)
+            unlinked.append(num)
+        else:
+            email = (data.get("accounts") or {}).get(num, {}).get("email", "")
+            try:
+                switcher.remove_account(num, assume_yes=True, quiet=True)
+                removed.append(num)
+            except ClaudeSwitchError as e:
+                # Logout always completes: a slot that refuses to be removed
+                # (e.g. it is the live Claude Code session) just stays as a
+                # plain local account instead of blocking the sign-out.
+                switcher.set_slot_pool_info(num, None, False)
+                kept.append((num, email, str(e)))
+    clear_session(switcher.backup_dir)
+    return LogoutResult(removed=removed, kept=kept, unlinked=unlinked)
+
+
+def status_lines(switcher: ClaudeAccountSwitcher) -> list[str]:
+    """Exactly the lines `cswap pool status` prints in human (non-JSON) mode."""
+    session = load_session(switcher.backup_dir)
+    if session is None:
+        return [dimmed("Not logged in to a pool. Run: cswap pool login")]
+    state = load_state(switcher.backup_dir)
+    data = switcher._get_sequence_data() or {}
+    rows = []
+    for num in sorted((data.get("accounts") or {}).keys(), key=int):
+        account_id, owned = switcher.slot_pool_info(num)
+        if account_id:
+            rows.append({"number": int(num), "email": data["accounts"][num].get("email", ""),
+                         "owned": owned, "poolAccountId": account_id})
+    lines = [f"{bolded('Pool:')} {session.url}  as {session.email}"]
+    last = state.get("lastPassAt")
+    lines.append("  machine " + machine_id(switcher.backup_dir) + "  last sync "
+                  + (f"{int(time.time() - last)}s ago" if isinstance(last, (int, float)) else "never"))
+    for row in rows:
+        tag = "owned" if row["owned"] else "borrowed"
+        lines.append(f"  {row['number']:>2}  {row['email']}  {dimmed(tag)}")
+    for item in state.get("attention", []):
+        lines.append(yellowed(
+            f"  your account {item['email']} needs re-login (reported {_ago(item.get('since'), time.time())}); "
+            "log in with Claude Code, then run: cswap add"
+        ))
+    return lines
+
+
+def apply_pooled_defaults(switcher: ClaudeAccountSwitcher) -> bool:
+    """Set autoswitch.deadTokenStrikes=2 when it's lower; True if changed."""
+    if load_settings(switcher.backup_dir).dead_token_strikes >= 2:
+        return False
+    set_setting(switcher.backup_dir, "autoswitch.deadTokenStrikes", "2")
+    return True
+
+
+def pool_logged_in(switcher: ClaudeAccountSwitcher) -> bool:
+    return load_session(switcher.backup_dir) is not None
 
 
 # -- pool ------------------------------------------------------------------------
@@ -103,71 +216,40 @@ def _login(switcher: ClaudeAccountSwitcher, args) -> None:
     if not (url and anon_key and email and password):
         raise PoolError("url, anon key, email and password are all required")
 
-    client = PoolClient(url, anon_key)
-    session = client.sign_in_password(email, password)
-    from claude_swap.pool.sync import POOL_SCHEMA_VERSION
-    version = client.schema_version(session)
-    if version != POOL_SCHEMA_VERSION:
-        raise PoolError(f"pool schema is v{version}; this cswap speaks v{POOL_SCHEMA_VERSION}")
-    member = client.member(session)
-    client.register_machine(session, machine_id(switcher.backup_dir), platform.node(), __version__)
-
-    save_session(switcher.backup_dir, session)
-    set_setting(switcher.backup_dir, "pool.url", url)
-    set_setting(switcher.backup_dir, "pool.anonKey", anon_key)
-    print(f"{accent('Logged in')} to the pool as {email} ({member['role']})")
-
-    sync = PoolSync(switcher, client, session, machine_id=machine_id(switcher.backup_dir))
-    _print_report(sync.run_pass())
-    from claude_swap.settings import load_settings
-    if load_settings(switcher.backup_dir).dead_token_strikes < 2:
+    result = login_pool(switcher, url, anon_key, email, password)
+    print(f"{accent('Logged in')} to the pool as {result.email} ({result.role})")
+    _print_report(result.report)
+    if result.suggest_strikes:
         print(dimmed("Tip: cswap config set autoswitch.deadTokenStrikes 2 tolerates the pool's sync lag"))
 
 
 def _logout(switcher: ClaudeAccountSwitcher, args) -> None:
-    if load_session(switcher.backup_dir) is None:
+    if not pool_logged_in(switcher):
         print(dimmed("Not logged in to a pool."))
         return
-    data = switcher._get_sequence_data() or {}
-    kept_due_to_failure = []
-    for num in sorted((data.get("accounts") or {}).keys(), key=int):
-        account_id, owned = switcher.slot_pool_info(num)
-        if not account_id:
-            continue
-        if owned or args.keep:
-            switcher.set_slot_pool_info(num, None, False)
-        else:
-            email = (data.get("accounts") or {}).get(num, {}).get("email", "")
-            try:
-                switcher.remove_account(num, assume_yes=True, quiet=True)
-            except ClaudeSwitchError as e:
-                # Logout always completes: a slot that refuses to be removed
-                # (e.g. it is the live Claude Code session) just stays as a
-                # plain local account instead of blocking the sign-out.
-                switcher.set_slot_pool_info(num, None, False)
-                print_warning(f"kept account {num} ({email}) locally: {e}")
-                kept_due_to_failure.append(num)
-    clear_session(switcher.backup_dir)
+    result = logout_pool(switcher, keep=args.keep)
+    for num, email, reason in result.kept:
+        print_warning(f"kept account {num} ({email}) locally: {reason}")
     if args.keep:
         suffix = "; borrowed accounts kept"
-    elif kept_due_to_failure:
-        suffix = f"; {len(kept_due_to_failure)} borrowed account(s) kept locally (see above)"
+    elif result.kept:
+        suffix = f"; {len(result.kept)} borrowed account(s) kept locally (see above)"
     else:
         suffix = "; borrowed accounts removed"
     print(f"{accent('Logged out')} of the pool" + suffix)
 
 
 def _status(switcher: ClaudeAccountSwitcher, args) -> None:
-    session = load_session(switcher.backup_dir)
-    state = load_state(switcher.backup_dir)
-    data = switcher._get_sequence_data() or {}
-    rows = []
-    for num in sorted((data.get("accounts") or {}).keys(), key=int):
-        account_id, owned = switcher.slot_pool_info(num)
-        if account_id:
-            rows.append({"number": int(num), "email": data["accounts"][num].get("email", ""),
-                         "owned": owned, "poolAccountId": account_id})
     if args.json:
+        session = load_session(switcher.backup_dir)
+        state = load_state(switcher.backup_dir)
+        data = switcher._get_sequence_data() or {}
+        rows = []
+        for num in sorted((data.get("accounts") or {}).keys(), key=int):
+            account_id, owned = switcher.slot_pool_info(num)
+            if account_id:
+                rows.append({"number": int(num), "email": data["accounts"][num].get("email", ""),
+                             "owned": owned, "poolAccountId": account_id})
         print(json.dumps({
             "schemaVersion": 1,
             "member": None if session is None else {"email": session.email, "userId": session.user_id, "url": session.url},
@@ -177,19 +259,8 @@ def _status(switcher: ClaudeAccountSwitcher, args) -> None:
             "attention": state.get("attention", []),
         }, indent=2))
         return
-    if session is None:
-        print(dimmed("Not logged in to a pool. Run: cswap pool login"))
-        return
-    print(f"{bolded('Pool:')} {session.url}  as {session.email}")
-    last = state.get("lastPassAt")
-    print(f"  machine {machine_id(switcher.backup_dir)}  last sync "
-          + (f"{int(time.time() - last)}s ago" if isinstance(last, (int, float)) else "never"))
-    for row in rows:
-        tag = "owned" if row["owned"] else "borrowed"
-        print(f"  {row['number']:>2}  {row['email']}  {dimmed(tag)}")
-    for item in state.get("attention", []):
-        print_warning(f"  your account {item['email']} needs re-login (reported {_ago(item.get('since'), time.time())}); "
-                      "log in with Claude Code, then run: cswap add")
+    for line in status_lines(switcher):
+        print(line)
 
 
 def _share(switcher: ClaudeAccountSwitcher, args) -> None:
