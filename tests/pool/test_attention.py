@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import sys
-from unittest.mock import patch
+import time
+from unittest.mock import MagicMock, patch
 
 from claude_swap import cli, oauth
-from claude_swap.pool.sync import attention_lines, load_state, save_state
+from claude_swap.pool.sync import _ago, attention_lines, load_state, save_state
 from tests.pool.conftest import _seed, _switcher
 
 
@@ -28,6 +29,18 @@ def test_line_wording(temp_home):
     (line,) = attention_lines(s.backup_dir)
     assert line.startswith("your account harsha@teli.ai needs re-login")
     assert line.endswith("log in with Claude Code, then run: cswap add")
+
+
+def test_ago_tolerates_a_non_string_since():
+    now = time.time()
+    assert _ago(12345, now) == "recently"
+    assert _ago("garbage", now) == "recently"
+
+
+def test_load_state_tolerates_a_non_path_root(tmp_path):
+    """A mocked-switcher ``backup_dir`` (any non-Path) degrades to empty state,
+    same as a real, empty backup directory."""
+    assert load_state(MagicMock()) == load_state(tmp_path)
 
 
 def test_list_prints_footer_and_json_field(temp_home, capsys):

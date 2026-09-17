@@ -231,7 +231,10 @@ class CswapApp(App):
             if elapsed >= self.POLL_INTERVAL_S:
                 parts.append(f"refreshing {format_duration(elapsed)}")
         from claude_swap.pool.sync import attention_lines
-        notes = attention_lines(self.switcher.backup_dir, now)
+        try:  # a status note must never take the app down
+            notes = attention_lines(self.switcher.backup_dir, now)
+        except Exception:
+            notes = []
         if notes:
             parts.insert(0, notes[0])
         self.refresh_status = " · ".join(parts)

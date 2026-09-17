@@ -1647,15 +1647,12 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 show_token_status=args.token_status,
                 json_output=args.json,
             )
-            try:  # best-effort: a pool state problem must never break `list`
-                from claude_swap.pool.sync import attention_lines, load_state
-                if args.json and payload is not None:
-                    payload["poolAttention"] = load_state(switcher.backup_dir).get("attention", [])
-                elif not args.json:
-                    for line in attention_lines(switcher.backup_dir):
-                        warning(f"  ⚠ {line}")
-            except Exception:  # noqa: BLE001 - best-effort nicety
-                pass
+            from claude_swap.pool.sync import attention_lines, load_state
+            if args.json and payload is not None:
+                payload["poolAttention"] = load_state(switcher.backup_dir).get("attention", [])
+            elif not args.json:
+                for line in attention_lines(switcher.backup_dir):
+                    warning(f"  ⚠ {line}")
         elif args.switch:
             from claude_swap.settings import load_settings, parse_model_names
 

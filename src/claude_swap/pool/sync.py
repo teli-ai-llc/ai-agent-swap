@@ -53,7 +53,9 @@ def load_state(backup_root: Path) -> dict:
         raw = json.loads(_state_path(backup_root).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return _empty_state()
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, TypeError) as e:
+        # TypeError also covers a non-Path ``backup_root`` (e.g. a mocked
+        # switcher in tests) — degrade to empty state rather than raise.
         _logger.warning("Could not read %s (%s); starting pool state fresh", _state_path(backup_root), e)
         return _empty_state()
     if not isinstance(raw, dict):
@@ -463,7 +465,7 @@ def _ago(iso: str | None, now: float) -> str:
     from datetime import datetime
     try:
         then = datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):
         return "recently"
     seconds = max(0, int(now - then))
     if seconds < 3600:
