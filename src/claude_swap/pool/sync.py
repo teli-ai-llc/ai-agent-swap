@@ -201,7 +201,16 @@ class PoolSync:
         for row in rows:  # ascending updated_at
             try:
                 self._apply_row(report, state, row)
-            except (ClaudeSwitchError, PoolError, OSError) as e:
+            except PoolError as e:
+                # spec failure table: a bad row (missing/invalid blob) is not
+                # retried -- skip it and let the watermark advance past it, so
+                # it doesn't hold up every row behind it.
+                report.errors.append(f"{row.email}: {e}")
+                watermark = row.updated_at
+                continue
+            except (ClaudeSwitchError, OSError) as e:
+                # a local write failure is this machine's problem, not the
+                # row's -- keep the watermark before it so the next pass retries.
                 report.errors.append(f"{row.email}: {e}")
                 break  # keep the watermark before this row; retry next pass
             watermark = row.updated_at
@@ -228,7 +237,7 @@ class PoolSync:
         creds_text, config_text = blob_to_local(row.credential)
 
         if num is None:
-            num = self._land_new_row(data, row, mine, creds_text, config_text)
+            num = self._land_new_row(row, mine, creds_text, config_text)
             state["pushed"][num] = credential_fingerprint(creds_text) or ""
             report.added.append(num)
             return
@@ -253,10 +262,10 @@ class PoolSync:
 
         if str(data.get("activeAccountNumber")) == num:
             current = self.switcher._get_current_account()
-            if current and current[0] == email:
+            if current and current[0] == email and current[1] == (record.get("organizationUuid") or ""):
                 self.switcher.switch_to(num, json_output=True, force=True)
 
-    def _land_new_row(self, data: dict, row: PoolAccountRow, mine: bool,
+    def _land_new_row(self, row: PoolAccountRow, mine: bool,
                       creds_text: str, config_text: str) -> str:
         from claude_swap.models import get_timestamp
         from claude_swap.rules import apply_rule

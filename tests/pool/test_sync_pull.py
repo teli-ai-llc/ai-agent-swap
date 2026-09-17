@@ -82,6 +82,25 @@ class TestPull:
         live = json.loads((temp_home / ".claude" / ".credentials.json").read_text())
         assert live["claudeAiOauth"]["refreshToken"] == "rt-2"
 
+    def test_active_rewrite_requires_matching_org(self, sync_env, fake_pool, owner, borrower, temp_home):
+        s, client, _ = sync_env
+        session = fake_pool.session_for(borrower)
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
+        # same email, different org than the slot -- not the same live identity
+        (temp_home / ".claude.json").write_text(_config("acct-o@x.io", "acct-o", "other-org"))
+        (temp_home / ".claude" / ".credentials.json").write_text(_creds("rt-1", 1_000))
+        data = s._get_sequence_data(); data["activeAccountNumber"] = 3; s._write_json(s.sequence_file, data)
+        client.push_credential(fake_pool.session_for(owner), row.id,
+                               fake_pool.row(row.id)["credential"] | {"claudeAiOauth": {
+                                   "accessToken": "a2", "refreshToken": "rt-2", "expiresAt": 2_000}},
+                               2_000, "sha256:2", "99999999-9999-9999-9999-999999999999")
+        report = PoolSync(s, client, session, machine_id=MID).run_pass()
+        assert report.pulled == ["3"]
+        assert _login(s, "3", "acct-o@x.io")["refreshToken"] == "rt-2"   # backup updated
+        live = json.loads((temp_home / ".claude" / ".credentials.json").read_text())
+        assert live["claudeAiOauth"]["refreshToken"] == "rt-1"   # live untouched
+
     def test_withdrawn_removes_borrowed_slot_only(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
         session = fake_pool.session_for(borrower)
@@ -92,11 +111,24 @@ class TestPull:
         assert report.removed == ["3"]
         assert "3" not in s._get_sequence_data()["accounts"]
 
-    def test_invalid_blob_is_skipped_and_watermark_holds(self, sync_env, fake_pool, owner, borrower):
+    def test_invalid_blob_is_skipped_and_watermark_advances(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
         session = fake_pool.session_for(borrower)
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         fake_pool.row(row.id)["credential"] = {"garbage": True}
         report = PoolSync(s, client, session, machine_id=MID).run_pass()
         assert report.added == [] and report.errors
+        assert load_state(s.backup_dir)["pulledAt"] == fake_pool.row(row.id)["updated_at"]
+
+    def test_local_write_failure_holds_watermark(self, sync_env, fake_pool, owner, borrower, monkeypatch):
+        s, client, _ = sync_env
+        session = fake_pool.session_for(borrower)
+        _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        monkeypatch.setattr(
+            s, "_write_account_credentials",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        report = PoolSync(s, client, session, machine_id=MID).run_pass()
+        assert report.errors
+        assert report.added == []
         assert load_state(s.backup_dir)["pulledAt"] is None
