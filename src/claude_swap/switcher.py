@@ -1947,6 +1947,32 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data() or {}
         return rule_from_record((data.get("accounts") or {}).get(str(account_num)))
 
+    def slot_pool_info(self, num: str) -> tuple[str | None, bool]:
+        """``(poolAccountId, poolOwned)`` for a slot; ``(None, False)`` when the
+        slot is purely local or unknown."""
+        data = self._get_sequence_data() or {}
+        record = (data.get("accounts") or {}).get(str(num)) or {}
+        account_id = record.get("poolAccountId")
+        if not isinstance(account_id, str) or not account_id:
+            return None, False
+        return account_id, bool(record.get("poolOwned"))
+
+    def set_slot_pool_info(self, num: str, account_id: str | None, owned: bool) -> None:
+        """Link (or unlink, with ``account_id=None``) a slot to a pool row."""
+        with FileLock(self.lock_file):
+            data = self._get_sequence_data() or {}
+            record = (data.get("accounts") or {}).get(str(num))
+            if record is None:
+                raise KeyError(f"no account in slot {num}")
+            if account_id:
+                record["poolAccountId"] = account_id
+                record["poolOwned"] = bool(owned)
+            else:
+                record.pop("poolAccountId", None)
+                record.pop("poolOwned", None)
+            data["lastUpdated"] = get_timestamp()
+            self._write_json(self.sequence_file, data)
+
     def set_account_rule(
         self,
         identifier: str,
@@ -3565,7 +3591,7 @@ class ClaudeAccountSwitcher:
         slot: int | None = None,
         assume_yes: bool = False,
         alias: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Add current account to managed accounts.
 
         Args:
@@ -3577,6 +3603,10 @@ class ClaudeAccountSwitcher:
                   confirmation UI, e.g. the TUI, confirm before calling).
             alias: Optional short display alias to set on this account.
                   When omitted, an existing alias on the slot is preserved.
+
+        Returns:
+            The slot number filled, as a string. ``None`` if a prompt was
+            declined or interrupted.
         """
         self._refuse_session_shell()
         self._setup_directories()
@@ -3659,7 +3689,7 @@ class ClaudeAccountSwitcher:
                 f"{accent('Updated credentials')} for Account {account_num} "
                 f"({current_email} {muted(f'[{tag}]')})."
             )
-            return
+            return account_num
 
         # Determine slot number and collect confirmation decisions
         # (no destructive operations until new account is verified readable)
@@ -3791,6 +3821,10 @@ class ClaudeAccountSwitcher:
 
         # Update sequence.json
         data = self._get_sequence_data()
+        prior_pool = (data.get("accounts", {}).get(account_num) or {})
+        carried_pool = {
+            k: prior_pool[k] for k in ("poolAccountId", "poolOwned") if k in prior_pool
+        } if prior_pool.get("email") == current_email else {}
         data["accounts"][account_num] = {
             "email": current_email,
             "uuid": account_uuid,
@@ -3798,6 +3832,7 @@ class ClaudeAccountSwitcher:
             "organizationName": organization_name,
             "added": get_timestamp(),
         }
+        data["accounts"][account_num].update(carried_pool)
         carried_alias = alias if alias is not None else existing_alias
         if carried_alias:
             data["accounts"][account_num]["alias"] = carried_alias
@@ -3813,6 +3848,7 @@ class ClaudeAccountSwitcher:
         if migrate_from:
             print(f"{dimmed(f'Moved from slot {migrate_from} → {slot}')}")
         print(f"{accent('Added')} Account {account_num}: {current_email} {muted(f'[{tag}]')}")
+        return account_num
 
     def add_account_from_token(
         self,
