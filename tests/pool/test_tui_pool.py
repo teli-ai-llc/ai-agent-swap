@@ -1,23 +1,51 @@
 """Pilot-driven tests for the pool TUI pieces.
 
 Task 2 covers just the two modals (`PoolLoginModal`, `PoolShareModal`) and
-their form dataclasses; the menu/dispatch wiring lands in Task 3.
+their form dataclasses; Task 3 (below `# -- menu, dispatch, actions --`)
+covers the "Pool…" submenu, its dispatch, and the app actions behind it.
 """
 
 from __future__ import annotations
 
-import pytest
-from textual.widgets import Checkbox, Input, Static
+from types import SimpleNamespace
 
+import pytest
+from textual.widgets import Checkbox, Input, ListView, Static
+
+import claude_swap.pool.cli as pool_cli
+import claude_swap.pool.sync as pool_sync
 from claude_swap.tui.modals import (
+    ConfirmModal,
+    OutputModal,
     PoolLoginForm,
     PoolLoginModal,
     PoolShareForm,
     PoolShareModal,
 )
-from tests.test_tui import FakeSwitcher, make_account, make_app
+from claude_swap.tui.widgets import MenuItem
+from tests.test_tui import FakeSwitcher, make_account, make_app, menu_select, settle
 
 pytestmark = pytest.mark.asyncio
+
+
+class PoolAwareFakeSwitcher(FakeSwitcher):
+    """`FakeSwitcher` plus `slot_pool_info`, for the withdraw list."""
+
+    def __init__(self, accounts, backup_dir, pool_info=None):
+        super().__init__(accounts, backup_dir)
+        self._pool_info = pool_info or {}
+
+    def slot_pool_info(self, num: str) -> tuple[str | None, bool]:
+        return self._pool_info.get(str(num), (None, False))
+
+
+def _menu_ids(app) -> list[str]:
+    menu = app.screen.query_one("#menu", ListView)
+    return [item.action_id for item in menu.query(MenuItem)]
+
+
+def _output_text(app) -> str:
+    return app.screen.query_one(".modal-output Static").render().plain
 
 
 # ---------------------------------------------------------------------------
@@ -202,3 +230,355 @@ class TestPoolShareModal:
             await pilot.click("#publish")
             await pilot.pause()
             assert results == [PoolShareForm(True, 80.0, None)]
+
+
+# ---------------------------------------------------------------------------
+# menu, dispatch, actions
+# ---------------------------------------------------------------------------
+
+
+class TestPoolMenu:
+    async def test_root_menu_has_pool_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            assert "pool-menu" in _menu_ids(app)
+
+    async def test_logged_out_submenu_is_login_and_back(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            assert _menu_ids(app) == ["pool-login", "back"]
+
+    async def test_logged_in_submenu_has_seven_entries_in_order(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            assert _menu_ids(app) == [
+                "pool-status",
+                "pool-share-menu",
+                "pool-withdraw-menu",
+                "pool-sync",
+                "pool-defaults",
+                "pool-logout-menu",
+                "back",
+            ]
+
+    async def test_pool_share_menu_lists_every_account(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-share-menu")
+            assert _menu_ids(app) == ["pool-share:1", "pool-share:2", "back"]
+
+    async def test_pool_withdraw_menu_lists_only_owned_slots(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        fake = PoolAwareFakeSwitcher(
+            [make_account(1, active=True), make_account(2), make_account(3)],
+            tmp_path,
+            pool_info={
+                "1": ("acct-1", True),  # owned: listed
+                "2": ("acct-2", False),  # borrowed: not listed
+                # 3: not pooled at all
+            },
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-withdraw-menu")
+            assert _menu_ids(app) == ["pool-withdraw:1", "back"]
+
+    async def test_pool_withdraw_menu_placeholder_when_nothing_owned(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        # Plain FakeSwitcher has no slot_pool_info at all — must be tolerated.
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-withdraw-menu")
+            assert _menu_ids(app) == ["back"]
+
+    async def test_pool_logout_menu_entries(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-logout-menu")
+            assert _menu_ids(app) == ["pool-logout:remove", "pool-logout:keep", "back"]
+
+
+class TestPoolLoginAction:
+    async def test_login_calls_login_pool_and_shows_output_never_the_password(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+        calls = []
+
+        def fake_login(switcher, url, anon_key, email, password):
+            calls.append((url, anon_key, email, password))
+            return pool_cli.LoginResult(
+                email=email,
+                role="member",
+                report=pool_sync.PassReport(pushed=["1"]),
+                suggest_strikes=False,
+            )
+
+        monkeypatch.setattr(pool_cli, "login_pool", fake_login)
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-login")
+            assert isinstance(app.screen, PoolLoginModal)
+            app.screen.query_one("#url", Input).value = "https://pool.example.com"
+            app.screen.query_one("#anon-key", Input).value = "anon-key-123"
+            app.screen.query_one("#email", Input).value = "member@example.com"
+            app.screen.query_one("#password", Input).value = "hunter2"
+            await pilot.click("#login")
+            await settle(pilot)
+            assert calls == [
+                (
+                    "https://pool.example.com",
+                    "anon-key-123",
+                    "member@example.com",
+                    "hunter2",
+                )
+            ]
+            assert isinstance(app.screen, OutputModal)
+            output = _output_text(app)
+            assert "Logged in as member@example.com" in output
+            assert "hunter2" not in output
+
+    async def test_login_prefills_from_pool_settings(self, tmp_path, monkeypatch):
+        import json
+
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+        (tmp_path / "settings.json").write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "pool": {"url": "https://saved.example.com", "anonKey": "saved-key"},
+                }
+            )
+        )
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-login")
+            assert isinstance(app.screen, PoolLoginModal)
+            assert app.screen.query_one("#url", Input).value == "https://saved.example.com"
+            assert app.screen.query_one("#anon-key", Input).value == "saved-key"
+
+
+class TestPoolStatusAction:
+    async def test_status_shows_output_modal_with_patched_lines(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        monkeypatch.setattr(
+            pool_cli, "status_lines", lambda switcher: ["Pool: https://x  as a@b.com", "  1 owned"]
+        )
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-status")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            output = _output_text(app)
+            assert "Pool: https://x  as a@b.com" in output
+            assert "1 owned" in output
+
+
+class TestPoolShareAction:
+    async def test_publish_calls_publish_slot_with_form_values(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        calls = []
+
+        class StubSync:
+            client = object()
+            session = object()
+
+            def publish_slot(self, num, *, shared, swap_limit, hard_limit):
+                calls.append((num, shared, swap_limit, hard_limit))
+                return SimpleNamespace(
+                    shared=shared,
+                    email="user1@example.com",
+                    share_swap_limit=swap_limit,
+                    share_hard_limit=hard_limit,
+                )
+
+        monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-share-menu")
+            await menu_select(pilot, "pool-share:1")
+            assert isinstance(app.screen, PoolShareModal)
+            app.screen.query_one("#swap", Input).value = "80"
+            app.screen.query_one("#hard", Input).value = "50"
+            await pilot.click("#publish")
+            await settle(pilot)
+            assert calls == [("1", True, 80.0, 50.0)]
+            assert isinstance(app.screen, OutputModal)
+            assert "user1@example.com" in _output_text(app)
+
+
+class TestPoolWithdrawAction:
+    async def test_withdraw_confirms_then_calls_withdraw_slot(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        calls = []
+
+        class StubSync:
+            client = object()
+            session = object()
+
+            def withdraw_slot(self, num):
+                calls.append(num)
+
+        monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
+
+        fake = PoolAwareFakeSwitcher(
+            [make_account(1, active=True)],
+            tmp_path,
+            pool_info={"1": ("acct-1", True)},
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-withdraw-menu")
+            await menu_select(pilot, "pool-withdraw:1")
+            assert isinstance(app.screen, ConfirmModal)
+            await pilot.press("y")
+            await settle(pilot)
+            assert calls == ["1"]
+
+    async def test_withdraw_cancel_is_safe(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        calls = []
+
+        class StubSync:
+            client = object()
+            session = object()
+
+            def withdraw_slot(self, num):
+                calls.append(num)
+
+        monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
+
+        fake = PoolAwareFakeSwitcher(
+            [make_account(1, active=True)],
+            tmp_path,
+            pool_info={"1": ("acct-1", True)},
+        )
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-withdraw-menu")
+            await menu_select(pilot, "pool-withdraw:1")
+            await pilot.press("n")
+            await settle(pilot)
+            assert calls == []
+
+
+class TestPoolSyncNowAction:
+    async def test_sync_now_shows_a_notification_with_the_report_text(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        monkeypatch.setattr(
+            pool_sync,
+            "run_pass_quietly",
+            lambda switcher, force=False: pool_sync.PassReport(pulled=["3"]),
+        )
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        notified = []
+        app.notify = lambda msg, *a, **kw: notified.append(msg)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-sync")
+            await settle(pilot)
+            assert any("pulled 1 update" in msg for msg in notified)
+
+
+class TestPoolDefaultsAction:
+    async def test_defaults_applies_and_notifies(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        monkeypatch.setattr(pool_cli, "apply_pooled_defaults", lambda switcher: True)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        notified = []
+        app.notify = lambda msg, *a, **kw: notified.append(msg)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-defaults")
+            await settle(pilot)
+            assert any("deadTokenStrikes set to 2" in msg for msg in notified)
+
+
+class TestPoolLogoutAction:
+    async def test_logout_remove_calls_logout_pool_with_keep_false(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        calls = []
+
+        def fake_logout(switcher, *, keep):
+            calls.append(keep)
+            return pool_cli.LogoutResult(removed=["1"], kept=[], unlinked=[])
+
+        monkeypatch.setattr(pool_cli, "logout_pool", fake_logout)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-logout-menu")
+            await menu_select(pilot, "pool-logout:remove")
+            await settle(pilot)
+            assert calls == [False]
+
+    async def test_logout_keep_calls_logout_pool_with_keep_true(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: True)
+        calls = []
+
+        def fake_logout(switcher, *, keep):
+            calls.append(keep)
+            return pool_cli.LogoutResult(removed=[], kept=[], unlinked=["1"])
+
+        monkeypatch.setattr(pool_cli, "logout_pool", fake_logout)
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-logout-menu")
+            await menu_select(pilot, "pool-logout:keep")
+            await settle(pilot)
+            assert calls == [True]

@@ -834,6 +834,7 @@ class TestDashboard:
                 "add-menu",
                 "disable-menu",
                 "rules-menu",
+                "pool-menu",
                 "remove-menu",
                 "theme-menu",
                 "quit",

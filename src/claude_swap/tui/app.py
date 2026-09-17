@@ -22,7 +22,7 @@ from textual.worker import WorkerState
 from claude_swap import printer
 from claude_swap.models import AccountsSnapshot
 from claude_swap.snapshot_source import account_identity
-from claude_swap.settings import load_settings, load_ui_settings, set_setting
+from claude_swap.settings import load_pool_settings, load_settings, load_ui_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen
@@ -31,6 +31,10 @@ from claude_swap.tui.modals import (
     AddTokenModal,
     ConfirmModal,
     OutputModal,
+    PoolLoginForm,
+    PoolLoginModal,
+    PoolShareForm,
+    PoolShareModal,
     RuleForm,
     RuleModal,
     TokenForm,
@@ -393,6 +397,185 @@ class CswapApp(App):
                 priority=form.priority,
             )
         self._start_action(f"Rules for account {number}", fn)
+
+    # -- pool -------------------------------------------------------------------
+    # Every ``claude_swap.pool.*`` import below lives inside its method so a
+    # machine with no pool never imports the pool's network/client code on
+    # the hot path (menu render, snapshot poll).
+
+    def pool_logged_in(self) -> bool:
+        from claude_swap.pool.cli import pool_logged_in as _pool_logged_in
+
+        return _pool_logged_in(self.switcher)
+
+    def action_pool_login(self) -> None:
+        settings = load_pool_settings(self.switcher.backup_dir)
+        self.push_screen(
+            PoolLoginModal(settings.url, settings.anon_key), self._on_pool_login_form
+        )
+
+    def _on_pool_login_form(self, form: PoolLoginForm | None) -> None:
+        if form is None:
+            return
+
+        def do_login() -> None:
+            from claude_swap.pool.cli import describe_report, login_pool
+
+            result = login_pool(
+                self.switcher, form.url, form.anon_key, form.email, form.password
+            )
+            print(f"Logged in as {result.email} ({result.role})")
+            print(f"Sync: {describe_report(result.report)}")
+            if result.suggest_strikes:
+                print(
+                    "Tip: cswap config set autoswitch.deadTokenStrikes 2 "
+                    "tolerates the pool's sync lag"
+                )
+
+        self._start_action("Pool login", do_login, show_output=True)
+
+    def action_pool_status(self) -> None:
+        def do_status() -> None:
+            from claude_swap.pool.cli import status_lines
+
+            for line in status_lines(self.switcher):
+                print(line)
+
+        self._start_action("Pool status", do_status, show_output=True)
+
+    def open_pool_share(self, number: str) -> None:
+        snap = self.snapshot
+        acc = next(
+            (a for a in (snap.accounts if snap else ()) if a.number == number), None
+        )
+        label = (
+            (f"{acc.alias} ({acc.email})" if acc.alias else acc.email)
+            if acc is not None
+            else number
+        )
+        current = self._pool_share_current(number)
+        self.push_screen(
+            PoolShareModal(number, label, current),
+            partial(self._on_pool_share_form, number),
+        )
+
+    def _pool_share_current(self, number: str) -> PoolShareForm | None:
+        """Prefill from the pool's current row when this slot is already
+        published; ``None`` (fresh publish defaults) otherwise or on error."""
+        from claude_swap.pool.sync import build_sync
+
+        try:
+            sync = build_sync(self.switcher)
+            if sync is None:
+                return None
+            info = getattr(self.switcher, "slot_pool_info", None)
+            if info is None:
+                return None
+            account_id, _owned = info(number)
+            if not account_id:
+                return None
+            row = sync.client.get_account(sync.session, account_id)
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return PoolShareForm(
+            shared=row.shared,
+            swap_limit=row.share_swap_limit,
+            hard_limit=row.share_hard_limit,
+        )
+
+    def _on_pool_share_form(self, number: str, form: PoolShareForm | None) -> None:
+        if form is None:
+            return
+
+        def do_publish() -> None:
+            from claude_swap.exceptions import PoolError
+            from claude_swap.pool.sync import build_sync
+
+            sync = build_sync(self.switcher)
+            if sync is None:
+                raise PoolError("not logged in to a pool")
+            row = sync.publish_slot(
+                number,
+                shared=form.shared,
+                swap_limit=form.swap_limit,
+                hard_limit=form.hard_limit,
+            )
+            print(f"{'Shared' if row.shared else 'Published (private)'} {row.email}")
+            if row.share_swap_limit:
+                print(f"  swap {row.share_swap_limit:g}")
+            if row.share_hard_limit:
+                print(f"  hard {row.share_hard_limit:g}")
+
+        self._start_action(f"Publish account {number}", do_publish, show_output=True)
+
+    def confirm_pool_withdraw(self, number: str, email: str) -> None:
+        self.push_screen(
+            ConfirmModal(
+                f"Withdraw {email} from the pool? "
+                "Borrowers lose it on their next sync.",
+                title="Withdraw account",
+                yes_label="Withdraw",
+            ),
+            partial(self._on_pool_withdraw_confirm, number),
+        )
+
+    def _on_pool_withdraw_confirm(self, number: str, confirmed: bool | None) -> None:
+        if not confirmed:
+            return
+
+        def do_withdraw() -> None:
+            from claude_swap.exceptions import PoolError
+            from claude_swap.pool.sync import build_sync
+
+            sync = build_sync(self.switcher)
+            if sync is None:
+                raise PoolError("not logged in to a pool")
+            sync.withdraw_slot(number)
+            print(f"Withdrawn account {number} from the pool")
+
+        self._start_action(f"Withdraw account {number}", do_withdraw)
+
+    def action_pool_sync_now(self) -> None:
+        def do_sync() -> None:
+            from claude_swap.pool.cli import describe_report
+            from claude_swap.pool.sync import PassReport, run_pass_quietly
+
+            report = run_pass_quietly(self.switcher, force=True) or PassReport(
+                skipped="not logged in"
+            )
+            print(describe_report(report))
+
+        self._start_action("Sync now", do_sync)
+
+    def action_pool_defaults(self) -> None:
+        def do_defaults() -> None:
+            from claude_swap.pool.cli import apply_pooled_defaults
+
+            if apply_pooled_defaults(self.switcher):
+                print("autoswitch.deadTokenStrikes set to 2")
+            else:
+                print("already at 2 or higher")
+
+        self._start_action("Pooled-machine defaults", do_defaults)
+
+    def action_pool_logout(self, keep: bool) -> None:
+        def do_logout() -> None:
+            from claude_swap.pool.cli import logout_pool
+
+            result = logout_pool(self.switcher, keep=keep)
+            for num, email, reason in result.kept:
+                print(f"kept account {num} ({email}) locally: {reason}")
+            if keep:
+                suffix = "; borrowed accounts kept"
+            elif result.kept:
+                suffix = f"; {len(result.kept)} borrowed account(s) kept locally (see above)"
+            else:
+                suffix = "; borrowed accounts removed"
+            print(f"Logged out of the pool{suffix}")
+
+        self._start_action("Pool logout", do_logout, show_output=True)
 
     def action_add_current(self) -> None:
         self.push_screen(

@@ -109,6 +109,7 @@ class DashboardScreen(Screen):
             ("Add account…", "add-menu"),
             ("Disable / enable account…", "disable-menu"),
             ("Account rules…", "rules-menu"),
+            ("Pool…", "pool-menu"),
             ("Remove account…", "remove-menu"),
             ("Theme…", "theme-menu"),
             ("Quit", "quit"),
@@ -159,6 +160,64 @@ class DashboardScreen(Screen):
             entries.append((f"{acc.number}  {name}   {summary}", f"rule:{acc.number}"))
         entries.append(_BACK)
         return entries
+
+    def _pool_entries(self) -> MenuEntries:
+        """Log-in-only submenu when this machine has no pool session; the
+        full set of pool actions once it does."""
+        if not self.app.pool_logged_in():
+            return [("Log in…", "pool-login"), _BACK]
+        return [
+            ("Status", "pool-status"),
+            ("Publish / share account…", "pool-share-menu"),
+            ("Withdraw account…", "pool-withdraw-menu"),
+            ("Sync now", "pool-sync"),
+            ("Apply pooled-machine defaults", "pool-defaults"),
+            ("Log out…", "pool-logout-menu"),
+            _BACK,
+        ]
+
+    def _pool_share_entries(self) -> MenuEntries:
+        """One row per account (same labelling as `_remove_entries`)."""
+        snap = self.app.snapshot
+        entries: MenuEntries = [
+            (
+                f"{acc.number}  {f'{acc.alias} ({acc.email})' if acc.alias else acc.email}"
+                f"  [{acc.display_tag}]",
+                f"pool-share:{acc.number}",
+            )
+            for acc in (snap.accounts if snap else ())
+        ]
+        entries.append(_BACK)
+        return entries
+
+    def _pool_withdraw_entries(self) -> MenuEntries:
+        """Only accounts this machine's member owns in the pool.
+
+        A switcher without ``slot_pool_info`` (older fakes, or a test that
+        never touches the pool) is tolerated: it just yields no owned rows.
+        """
+        snap = self.app.snapshot
+        info = getattr(self.app.switcher, "slot_pool_info", None)
+        entries: MenuEntries = []
+        if info is not None:
+            for acc in (snap.accounts if snap else ()):
+                account_id, owned = info(acc.number)
+                if account_id and owned:
+                    name = f"{acc.alias} ({acc.email})" if acc.alias else acc.email
+                    entries.append(
+                        (f"{acc.number}  {name}", f"pool-withdraw:{acc.number}")
+                    )
+        if not entries:
+            return [("(no owned pooled accounts)", "back")]
+        entries.append(_BACK)
+        return entries
+
+    def _pool_logout_entries(self) -> MenuEntries:
+        return [
+            ("Log out, remove borrowed accounts", "pool-logout:remove"),
+            ("Log out, keep borrowed accounts", "pool-logout:keep"),
+            _BACK,
+        ]
 
     def _theme_entries(self) -> MenuEntries:
         """dark / light / auto, with the active setting marked."""
@@ -237,6 +296,40 @@ class DashboardScreen(Screen):
         elif action_id.startswith("rule:"):
             number = action_id.split(":", 1)[1]
             app.open_rule_editor(number)
+            await self._pop_menu()
+        elif action_id == "pool-menu":
+            await self._push_menu("pool", self._pool_entries())
+        elif action_id == "pool-login":
+            app.action_pool_login()
+        elif action_id == "pool-status":
+            app.action_pool_status()
+        elif action_id == "pool-share-menu":
+            await self._push_menu("publish / share", self._pool_share_entries())
+        elif action_id.startswith("pool-share:"):
+            number = action_id.split(":", 1)[1]
+            app.open_pool_share(number)
+            await self._pop_menu()
+        elif action_id == "pool-withdraw-menu":
+            await self._push_menu("withdraw account", self._pool_withdraw_entries())
+        elif action_id.startswith("pool-withdraw:"):
+            number = action_id.split(":", 1)[1]
+            snap = app.snapshot
+            email = next(
+                (a.email for a in (snap.accounts if snap else ()) if a.number == number),
+                "?",
+            )
+            app.confirm_pool_withdraw(number, email)
+        elif action_id == "pool-sync":
+            app.action_pool_sync_now()
+        elif action_id == "pool-defaults":
+            app.action_pool_defaults()
+        elif action_id == "pool-logout-menu":
+            await self._push_menu("log out", self._pool_logout_entries())
+        elif action_id == "pool-logout:keep":
+            app.action_pool_logout(keep=True)
+            await self._pop_menu()
+        elif action_id == "pool-logout:remove":
+            app.action_pool_logout(keep=False)
             await self._pop_menu()
         else:
             actions[action_id]()
