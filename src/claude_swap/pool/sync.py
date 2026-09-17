@@ -14,10 +14,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from claude_swap.credentials import looks_like_api_key
-from claude_swap.exceptions import PoolAuthError, PoolError
+from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
 from claude_swap.oauth import credential_fingerprint
-from claude_swap.pool.blob import blob_fingerprint, blob_from_local, blob_version
-from claude_swap.pool.client import PoolClient
+from claude_swap.pool.blob import blob_fingerprint, blob_from_local, blob_to_local, blob_version
+from claude_swap.pool.client import PoolAccountRow, PoolClient
 from claude_swap.pool.session import PoolSession, save_session
 from claude_swap.settings import atomic_write_json
 
@@ -173,9 +173,114 @@ class PoolSync:
             if landed:
                 report.pushed.append(num)
 
-    # -- pull and status: Tasks 8 and 9 -----------------------------------------
-    def _pull(self, report: PassReport, state: dict, data: dict) -> None:
-        return None
+    # -- pull -----------------------------------------------------------------
+    def _local_version(self, num: str, record: dict, data: dict) -> int:
+        texts = self._local_texts(num, record, data)
+        if texts is None:
+            return -1
+        try:
+            return int((json.loads(texts[0]).get("claudeAiOauth") or {}).get("expiresAt") or 0)
+        except (ValueError, TypeError, AttributeError):
+            return -1
 
+    def _slot_for_row(self, data: dict, row: PoolAccountRow) -> str | None:
+        for num, record in (data.get("accounts") or {}).items():
+            if record.get("poolAccountId") == row.id:
+                return str(num)
+        return self.switcher._find_account_slot(data, row.email, row.organization_uuid)
+
+    def _pull(self, report: PassReport, state: dict, data: dict) -> None:
+        try:
+            rows = self.client.list_accounts(self.session, since=state.get("pulledAt"))
+        except PoolAuthError:
+            raise
+        except PoolError as e:
+            report.errors.append(f"pull failed: {e}")
+            return
+        watermark = state.get("pulledAt")
+        for row in rows:  # ascending updated_at
+            try:
+                self._apply_row(report, state, row)
+            except (ClaudeSwitchError, PoolError, OSError) as e:
+                report.errors.append(f"{row.email}: {e}")
+                break  # keep the watermark before this row; retry next pass
+            watermark = row.updated_at
+        state["pulledAt"] = watermark
+
+    def _apply_row(self, report: PassReport, state: dict, row: PoolAccountRow) -> None:
+        data = self.switcher._get_sequence_data() or {}
+        num = self._slot_for_row(data, row)
+        mine = row.owner_user_id == self.session.user_id
+
+        if row.status == "withdrawn":
+            if num is None:
+                return
+            if mine:
+                self.switcher.set_slot_pool_info(num, None, False)
+            else:
+                self.switcher.remove_account(num, assume_yes=True)
+                state["pushed"].pop(num, None)
+                report.removed.append(num)
+            return
+
+        if row.credential is None:
+            raise PoolError("row carries no usable credential")
+        creds_text, config_text = blob_to_local(row.credential)
+
+        if num is None:
+            num = self._land_new_row(data, row, mine, creds_text, config_text)
+            state["pushed"][num] = credential_fingerprint(creds_text) or ""
+            report.added.append(num)
+            return
+
+        record = data["accounts"][num]
+        if row.credential_version <= self._local_version(num, record, data):
+            if self.switcher.slot_pool_info(num) == (None, False):
+                self.switcher.set_slot_pool_info(num, row.id, mine)
+            return
+
+        email = record.get("email", "")
+        self.switcher._write_account_credentials(num, email, creds_text)
+        self.switcher._write_account_config(num, email, config_text)
+        self.switcher._usage_store.clear_dead_token(
+            [num], {num: (email, record.get("organizationUuid") or "")}
+        )
+        if self.switcher.slot_pool_info(num) == (None, False):
+            self.switcher.set_slot_pool_info(num, row.id, mine)
+        state["pushed"][num] = credential_fingerprint(creds_text) or ""
+        state["flagged"].pop(num, None)
+        report.pulled.append(num)
+
+        if str(data.get("activeAccountNumber")) == num:
+            current = self.switcher._get_current_account()
+            if current and current[0] == email:
+                self.switcher.switch_to(num, json_output=True, force=True)
+
+    def _land_new_row(self, data: dict, row: PoolAccountRow, mine: bool,
+                      creds_text: str, config_text: str) -> str:
+        from claude_swap.models import get_timestamp
+        from claude_swap.rules import apply_rule
+
+        num = str(self.switcher._get_next_account_number())
+        self.switcher._write_account_credentials(num, row.email, creds_text)
+        self.switcher._write_account_config(num, row.email, config_text)
+        data = self.switcher._get_sequence_data() or {"accounts": {}, "sequence": [], "activeAccountNumber": None}
+        record = {
+            "email": row.email, "uuid": row.account_uuid,
+            "organizationUuid": row.organization_uuid, "organizationName": row.organization_name,
+            "added": get_timestamp(), "poolAccountId": row.id, "poolOwned": mine,
+        }
+        if not mine:
+            apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
+                       hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0)
+        data.setdefault("accounts", {})[num] = record
+        if int(num) not in data.setdefault("sequence", []):
+            data["sequence"].append(int(num))
+            data["sequence"].sort()
+        data["lastUpdated"] = get_timestamp()
+        self.switcher._write_json(self.switcher.sequence_file, data)
+        return num
+
+    # -- status: Task 9 ---------------------------------------------------------
     def _status(self, report: PassReport, state: dict) -> None:
         return None
