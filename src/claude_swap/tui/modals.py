@@ -422,7 +422,16 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
         hard_raw = self.query_one("#hard", Input).value
         try:
             swap_limit = parse_swap_limit(swap_raw)
-            hard_limit = None if not hard_raw.strip() else parse_hard_limit(hard_raw)
+            # parse_hard_limit() itself maps blank/"off"/"default"/"none" to
+            # 100.0 (its own default), but here that spelling means "no pool
+            # hard limit at all" -> None, matching parse_swap_limit's blank
+            # handling and PoolShareForm.hard_limit's float | None contract.
+            hard_norm = hard_raw.strip().lower()
+            hard_limit = (
+                None
+                if hard_norm in ("", "off", "default", "none")
+                else parse_hard_limit(hard_raw)
+            )
         except ValueError as exc:
             self.query_one("#form-error", Static).update(str(exc))
             return

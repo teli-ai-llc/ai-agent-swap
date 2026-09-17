@@ -128,7 +128,7 @@ MenuItem Static.menu-item-muted { color: $secondary; }
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal {
+ConfirmModal, AddTokenModal, OutputModal, RuleModal, PoolLoginModal, PoolShareModal {
     align: center middle;
     background: $background 60%;
 }

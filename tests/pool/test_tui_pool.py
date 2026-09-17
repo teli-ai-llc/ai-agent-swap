@@ -81,6 +81,16 @@ class TestPoolLoginModal:
             await pilot.pause()
             assert results == [None]
 
+    async def test_centered_over_a_dimmed_backdrop(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            app.push_screen(PoolLoginModal(None, None), lambda _: None)
+            await pilot.pause()
+            styles = pilot.app.screen.styles
+            assert styles.align_horizontal == "center"
+            assert styles.align_vertical == "middle"
+
     async def test_blank_email_or_password_refused_with_error(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
         app = make_app(fake)
@@ -175,3 +185,20 @@ class TestPoolShareModal:
             await pilot.click("#publish")
             await pilot.pause()
             assert results == [PoolShareForm(True, None, None)]
+
+    @pytest.mark.parametrize("spelling", ["off", "OFF", "default", "none", "None"])
+    async def test_hard_limit_off_spellings_mean_none(self, tmp_path, spelling):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[PoolShareForm | None] = []
+            app.push_screen(
+                PoolShareModal("1", "user1@example.com", None), results.append
+            )
+            await pilot.pause()
+            screen = pilot.app.screen
+            screen.query_one("#swap", Input).value = "80"
+            screen.query_one("#hard", Input).value = spelling
+            await pilot.click("#publish")
+            await pilot.pause()
+            assert results == [PoolShareForm(True, 80.0, None)]
