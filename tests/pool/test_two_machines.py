@@ -14,7 +14,7 @@ from claude_swap.pool.client import PoolClient
 from claude_swap.pool.session import save_session
 from claude_swap.pool.sync import PoolSync
 from claude_swap.switcher import ClaudeAccountSwitcher
-from tests.pool.conftest import _config, _creds, _mark_dead, _seed
+from tests.pool.conftest import _config, _creds, _mark_dead
 
 A = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 B = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
@@ -101,18 +101,21 @@ def test_race_loser_recovers_without_flagging(machines, fake_pool):
     a, b = machines
     a.login_claude("h@x.io", "acct-h", "rt-1", 1_000)
     a.add()
-    b.run()
-    # both rotate inside one interval; A's is the later generation
-    b.login_claude("h@x.io", "acct-h", "rt-b", 1_500)
+    b.run()                                    # B holds rt-1 as a borrowed slot
     with b.active():
-        b.switcher.switch_to("1", json_output=True, force=True)
+        b.switcher.switch_to("1", json_output=True)   # B activates it; no live login yet, no force
+    # Inside one poll interval both Claude Codes rotate: A's generation is the later one
+    b.login_claude("h@x.io", "acct-h", "rt-b", 1_500)
     a.login_claude("h@x.io", "acct-h", "rt-a", 2_000)
-    b.run()   # pushes rt-b (1500)
-    a.run()   # pushes rt-a (2000): wins
+    assert a.run().pushed == ["1"]             # A lands 2000 first
+    assert fake_pool.rows()[0]["credential_version"] == 2_000
+    report = b.run()                           # B's push (1500) is refused as not newer; same pass pulls the winner
+    assert report.pushed == [] and report.pulled == ["1"]
+    # flagging only comes from usage-store strikes, which this scenario never produces; this asserts the two mechanisms stay orthogonal
+    assert report.flagged == []
     assert fake_pool.rows()[0]["credential"]["claudeAiOauth"]["refreshToken"] == "rt-a"
-    report = b.run()
-    assert report.pulled == ["1"] and report.flagged == []
     assert b.slot_rt("1", "h@x.io") == "rt-a"
+    assert b.live_rt() == "rt-a"               # B's active login was rewritten from the winner
     assert fake_pool.rows()[0]["status"] == "ok"
 
 
