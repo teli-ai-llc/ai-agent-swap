@@ -94,3 +94,11 @@ class MigrationIncomplete(ClaudeSwitchError):
     """
 
     pass
+
+
+class PoolError(ClaudeSwitchError):
+    """The team pool could not do what was asked (network, schema, refusal)."""
+
+
+class PoolAuthError(PoolError):
+    """The pool session was refused; the member must run `cswap pool login`."""

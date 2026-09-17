@@ -85,7 +85,24 @@ class UiSettings:
     inactive_cards: str = "full"
 
 
-_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings}
+@dataclass(frozen=True)
+class PoolSettings:
+    """Team pool connection (``pool`` section).
+
+    ``url`` and ``anon_key`` identify the Supabase project; both come from the
+    admin. ``poll_interval_seconds`` paces ``run_pass_quietly`` on every
+    surface that calls it. ``enabled`` false keeps a stored session but stops
+    every pass, the quick way to take a machine out of the pool without
+    logging out.
+    """
+
+    url: str | None = None
+    anon_key: str | None = None
+    poll_interval_seconds: float = 30.0
+    enabled: bool = True
+
+
+_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings, "pool": PoolSettings}
 
 
 @dataclass(frozen=True)
@@ -168,6 +185,22 @@ SETTING_SPECS: dict[str, SettingSpec] = {
         SettingSpec(
             "ui", "inactiveCards", "inactive_cards", "choice", choices=("full", "mini"),
             help="Dashboard rows for non-active accounts: full cards or one-line minis",
+        ),
+        SettingSpec(
+            "pool", "url", "url", "string",
+            help="Team pool: the Supabase project URL (https://<ref>.supabase.co)",
+        ),
+        SettingSpec(
+            "pool", "anonKey", "anon_key", "string",
+            help="Team pool: the Supabase anon (publishable) key",
+        ),
+        SettingSpec(
+            "pool", "pollIntervalSeconds", "poll_interval_seconds", "float", 10.0, 3600.0,
+            help="Team pool: seconds between sync passes",
+        ),
+        SettingSpec(
+            "pool", "enabled", "enabled", "bool",
+            help="Team pool: run sync passes (false pauses the pool without logging out)",
         ),
     )
 }
@@ -287,6 +320,32 @@ def load_ui_settings(backup_root: Path) -> UiSettings:
             continue
         kwargs[spec.field] = value
     return UiSettings(**kwargs)
+
+
+def load_pool_settings(backup_root: Path) -> PoolSettings:
+    """Load the pool section; per key, a bad value falls back to the default."""
+    raw = _read_raw(settings_path(backup_root))
+    section = raw.get("pool")
+    if not isinstance(section, dict):
+        return PoolSettings()
+    kwargs = {}
+    for spec in SETTING_SPECS.values():
+        if spec.section != "pool" or spec.json_key not in section:
+            continue
+        value = section[spec.json_key]
+        if spec.kind == "string":
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                kwargs[spec.field] = text.rstrip("/") if spec.json_key == "url" else text
+            continue
+        if spec.kind == "bool":
+            if isinstance(value, bool):
+                kwargs[spec.field] = value
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        kwargs[spec.field] = float(min(max(value, spec.lo), spec.hi))
+    return PoolSettings(**kwargs)
 
 
 def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
@@ -453,6 +512,7 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
     loaded = {
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
+        "pool": load_pool_settings(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():

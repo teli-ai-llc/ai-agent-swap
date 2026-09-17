@@ -15,8 +15,10 @@ from claude_swap.settings import (
     SETTING_SPECS,
     atomic_write_json,
     AutoSwitchSettings,
+    PoolSettings,
     UiSettings,
     effective_settings,
+    load_pool_settings,
     load_settings,
     load_ui_settings,
     merged_with_cli,
@@ -208,9 +210,16 @@ class TestSettingSpecs:
         assert by_section["ui"] == {
             f.name for f in UiSettings.__dataclass_fields__.values()
         }
+        assert by_section["pool"] == {
+            f.name for f in PoolSettings.__dataclass_fields__.values()
+        }
 
     def test_defaults_match_dataclass(self):
-        sources = {"autoswitch": AutoSwitchSettings(), "ui": UiSettings()}
+        sources = {
+            "autoswitch": AutoSwitchSettings(),
+            "ui": UiSettings(),
+            "pool": PoolSettings(),
+        }
         for spec in SETTING_SPECS.values():
             assert spec.default == getattr(sources[spec.section], spec.field)
 
@@ -400,3 +409,36 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestPoolSettings:
+    def test_defaults_when_file_missing(self, tmp_path):
+        assert load_pool_settings(tmp_path) == PoolSettings()
+        assert PoolSettings().poll_interval_seconds == 30.0
+        assert PoolSettings().enabled is True
+        assert PoolSettings().url is None
+
+    def test_set_and_load_round_trip(self, tmp_path):
+        set_setting(tmp_path, "pool.url", "https://abc.supabase.co/")
+        set_setting(tmp_path, "pool.anonKey", "anon-1")
+        set_setting(tmp_path, "pool.pollIntervalSeconds", "45")
+        set_setting(tmp_path, "pool.enabled", "false")
+        loaded = load_pool_settings(tmp_path)
+        # trailing slash stripped so URL joins never double it
+        assert loaded == PoolSettings(
+            url="https://abc.supabase.co", anon_key="anon-1",
+            poll_interval_seconds=45.0, enabled=False,
+        )
+
+    def test_bad_values_degrade_per_key(self, tmp_path):
+        (tmp_path / "settings.json").write_text(
+            '{"pool": {"url": 5, "pollIntervalSeconds": 1, "enabled": "yes"}}'
+        )
+        loaded = load_pool_settings(tmp_path)
+        assert loaded.url is None
+        assert loaded.poll_interval_seconds == 10.0   # clamped to the floor
+        assert loaded.enabled is True                 # non-bool -> default
+
+    def test_listed_by_effective_settings(self, tmp_path):
+        keys = {spec.dotted for spec, _, _ in effective_settings(tmp_path)}
+        assert {"pool.url", "pool.anonKey", "pool.pollIntervalSeconds", "pool.enabled"} <= keys
