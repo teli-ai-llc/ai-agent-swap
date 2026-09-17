@@ -1367,6 +1367,14 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         help="Specify slot number when adding account (use with 'add' or 'add-token')",
     )
     parser.add_argument(
+        "--pool", dest="pool_choice", action="store_true", default=None,
+        help="With 'add': publish the account to the team pool without asking",
+    )
+    parser.add_argument(
+        "--no-pool", dest="pool_choice", action="store_false",
+        help="With 'add': never offer to publish",
+    )
+    parser.add_argument(
         "--email",
         metavar="EMAIL",
         help=(
@@ -1615,7 +1623,10 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                 sys.exit(1)
 
         if args.add_account:
-            switcher.add_account(slot=args.slot, alias=args.alias)
+            added = switcher.add_account(slot=args.slot, alias=args.alias)
+            if added is not None:
+                from claude_swap.pool.cli import maybe_publish_after_add
+                maybe_publish_after_add(switcher, added, args.pool_choice)
             _offer_panel(switcher.backup_dir)
         elif args.add_token is not None:
             switcher.add_account_from_token(

@@ -332,10 +332,78 @@ class PoolSync:
     # -- sharing (Task 11) ---------------------------------------------------------
     def publish_slot(self, num: str, *, shared: bool, swap_limit: float | None,
                      hard_limit: float | None) -> PoolAccountRow:
-        raise PoolError("publish_slot: implemented in Task 11")
+        data = self.switcher._get_sequence_data() or {}
+        record = (data.get("accounts") or {}).get(num)
+        if record is None:
+            raise PoolError(f"no account in slot {num}")
+        texts = self._local_texts(num, record, data)
+        if texts is None:
+            raise PoolError(f"slot {num} has no stored login to publish")
+        creds_text, config_text = texts
+        blob = blob_from_local(creds_text, config_text)
+        account_uuid = blob["oauthAccount"]["accountUuid"]
+        org_uuid = blob["oauthAccount"].get("organizationUuid") or ""
+
+        row = self.client.find_account(self.session, account_uuid, org_uuid)
+        if row is None:
+            try:
+                row = self.client.create_account(self.session, {
+                    "account_uuid": account_uuid, "organization_uuid": org_uuid,
+                    "email": record.get("email", ""), "organization_name": record.get("organizationName", "") or "",
+                    "owner_user_id": self.session.user_id,
+                    "credential": blob, "credential_version": blob_version(blob),
+                    "credential_fingerprint": blob_fingerprint(blob),
+                    "updated_by_machine_id": self.machine_id,
+                    "shared": shared, "share_swap_limit": swap_limit, "share_hard_limit": hard_limit,
+                })
+            except PoolAuthError:
+                raise
+            except PoolError as e:
+                if "409" not in str(e):
+                    raise
+                # An unshared row owned by someone else is invisible to us
+                # (find_account found nothing), but the unique constraint on
+                # (account_uuid, organization_uuid) still refuses our insert.
+                raise PoolError(
+                    f"{record.get('email', '')} is already in the pool, owned by another "
+                    "member who has not shared it with you"
+                ) from None
+        elif row.owner_user_id != self.session.user_id:
+            owner_email = self._owner_label(row.owner_user_id)
+            raise PoolError(f"{record.get('email')} is already in the pool, owned by {owner_email}; "
+                            "only the owner can publish or change it")
+        else:
+            self.client.update_sharing(self.session, row.id, shared=shared,
+                                       swap_limit=swap_limit, hard_limit=hard_limit)
+            self.client.push_credential(self.session, row.id, blob, blob_version(blob),
+                                        blob_fingerprint(blob), self.machine_id)
+            row = self.client.get_account(self.session, row.id) or row
+        self.switcher.set_slot_pool_info(num, row.id, True)
+        state = load_state(self.switcher.backup_dir)
+        state["pushed"][num] = credential_fingerprint(creds_text) or ""
+        save_state(self.switcher.backup_dir, state)
+        return row
 
     def withdraw_slot(self, num: str) -> None:
-        raise PoolError("withdraw_slot: implemented in Task 11")
+        account_id, owned = self.switcher.slot_pool_info(num)
+        if not account_id:
+            raise PoolError(f"slot {num} is not in the pool")
+        if not owned:
+            raise PoolError(f"slot {num} is borrowed; only its owner can withdraw it (remove it locally with cswap remove)")
+        self.client.set_status(self.session, account_id, "withdrawn", self.machine_id)
+        self.switcher.set_slot_pool_info(num, None, False)
+
+    def _owner_label(self, user_id: str) -> str:
+        try:
+            rows = self.client._rest(self.session, "GET", "pool_members",
+                                     params={"user_id": f"eq.{user_id}", "select": "display_name"})
+        except PoolAuthError:
+            raise
+        except PoolError:
+            rows = []
+        if rows and rows[0].get("display_name"):
+            return rows[0]["display_name"]
+        return user_id
 
 
 def build_sync(switcher, *, transport=None) -> PoolSync | None:

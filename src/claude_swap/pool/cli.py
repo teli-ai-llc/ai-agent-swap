@@ -220,6 +220,37 @@ def _unshare(switcher: ClaudeAccountSwitcher, args) -> None:
     print(f"{accent('Withdrawn')} account {num} from the pool")
 
 
+def maybe_publish_after_add(switcher: ClaudeAccountSwitcher, num: str, choice: bool | None) -> None:
+    """After `cswap add`: republish an owned linked slot silently, else offer."""
+    sync = build_sync(switcher)
+    if sync is None:
+        return
+    account_id, owned = switcher.slot_pool_info(num)
+    try:
+        if account_id and owned:
+            report = sync.run_pass()
+            if report.pushed:
+                print(dimmed("  Pool: fresh login published"))
+            return
+        if account_id and not owned:
+            return
+        if choice is None:
+            if not (sys.stdin.isatty() and sys.stdout.isatty()):
+                return
+            try:
+                answer = input("Publish this account to the pool? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return
+            choice = answer in ("y", "yes")
+        if not choice:
+            return
+        row = sync.publish_slot(num, shared=True, swap_limit=None, hard_limit=None)
+        print(f"  {accent('Shared')} {row.email} with the pool "
+              + dimmed("(limits: cswap pool share N --swap-limit P --hard-limit P)"))
+    except PoolError as e:
+        print_warning(f"  Pool: {e}")
+
+
 # -- sync ------------------------------------------------------------------------
 def sync_command(argv: list[str]) -> None:
     raise SystemExit("cswap sync: implemented in Task 12")
