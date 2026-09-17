@@ -600,6 +600,8 @@ def run(switcher) -> int:
             # Lock-free handoff: worker only rebinds plain attributes (atomic in
             # CPython); the main-thread sync tick reads them. While the engine
             # runs it already paces all fetching, so the display reads store-only.
+            from claude_swap.pool.sync import run_pass_quietly
+            run_pass_quietly(self.switcher)
             try:
                 try:
                     raw = self._snapshot_source.take(
@@ -634,8 +636,6 @@ def run(switcher) -> int:
                     self._last_usage_log[num] = key
 
         def on_refresh_tick(self, _timer):
-            from claude_swap.pool.sync import run_pass_quietly
-            run_pass_quietly(self.switcher)
             self.refresh_async()
 
         def on_sync_tick(self, _timer):
