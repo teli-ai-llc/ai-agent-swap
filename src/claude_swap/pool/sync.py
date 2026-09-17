@@ -455,3 +455,29 @@ def run_pass_quietly(switcher, *, force: bool = False) -> PassReport | None:
     for err in report.errors:
         _logger.warning("pool: %s", err)
     return report
+
+
+def _ago(iso: str | None, now: float) -> str:
+    if not iso:
+        return "recently"
+    from datetime import datetime
+    try:
+        then = datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return "recently"
+    seconds = max(0, int(now - then))
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
+def attention_lines(backup_root: Path, now: float | None = None) -> list[str]:
+    """Owner-facing notes: one per pooled account of mine flagged needs_relogin."""
+    now = time.time() if now is None else now
+    return [
+        f"your account {item.get('email', '?')} needs re-login (reported {_ago(item.get('since'), now)}); "
+        "log in with Claude Code, then run: cswap add"
+        for item in load_state(backup_root).get("attention", [])
+    ]
