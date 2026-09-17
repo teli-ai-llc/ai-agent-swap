@@ -3,7 +3,7 @@
 One Supabase project per pool. The repo's `.mcp.json` is scoped to the
 "AI Agent Swapping" project.
 
-1. Apply `migrations/0001_pool.sql` (SQL editor, `supabase db push`, or the
+1. Apply `migrations/0001_pool.sql` then `migrations/0002_pool_hardening.sql` (SQL editor, `supabase db push`, or the
    MCP `apply_migration` tool).
 2. Add members: Authentication → Users → *Invite user* with their email. They
    receive an email and set a password.
