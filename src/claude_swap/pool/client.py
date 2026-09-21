@@ -159,9 +159,13 @@ class PoolClient:
         detail = self._auth_detail(data)
         if status == 429:
             raise PoolError(f"the pool's mailer is rate limited ({detail}); wait a minute and try again")
-        if status == 500 and "saving new user" in detail:
-            # A raise inside the auth.users insert trigger surfaces as this
-            # generic message; the guard is the only trigger we install.
+        if status == 500 and (
+            str(data.get("code")) == "23514" or "sign-ups from" in detail or "saving new user" in detail
+        ):
+            # ``pool_signup_guard`` raised inside the auth.users insert. Hosted
+            # GoTrue passes the Postgres error through (code 23514 plus the
+            # trigger's message, seen live 2026-09-21); older builds flatten it
+            # to "Database error saving new user".
             raise PoolAuthError(
                 f"the pool refused to create a login for {email}: its allowed "
                 "email domains do not include yours (ask the pool admin)"

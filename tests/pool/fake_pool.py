@@ -127,8 +127,12 @@ class FakePool:
                 return 422, b'{"code":422,"error_code":"otp_disabled","msg":"Signups not allowed for otp"}'
             domain = email.rsplit("@", 1)[1]
             if self.signup_domains and domain not in self.signup_domains:
-                # GoTrue never surfaces the trigger's message, only this.
-                return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Database error saving new user"}'
+                # What hosted GoTrue answers when pool_signup_guard raises
+                # (captured from the real project, 2026-09-21).
+                return 500, json.dumps({
+                    "code": "23514",
+                    "message": f"pool: sign-ups from @{domain} are not allowed (pool_meta.signup_domains)",
+                }).encode()
             self.add_member(email, password="")
         code = f"{len(self.sent_codes) + 1:06d}"
         self.codes[email] = code

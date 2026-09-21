@@ -215,6 +215,24 @@ class TestRest:
         assert row.credential_version == 5 and row.share_hard_limit is None
 
 
+def test_older_gotrue_flattens_the_signup_guard_refusal():
+    """Builds that hide the trigger's message still get the domain advice."""
+    def transport(method, url, headers, body):
+        return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Database error saving new user"}'
+    client = PoolClient("https://x.supabase.co", "anon", transport=transport)
+    with pytest.raises(PoolAuthError, match="email domains"):
+        client.request_email_code("a@elsewhere.example")
+
+
+def test_an_unrelated_500_on_code_request_is_not_blamed_on_the_domain():
+    def transport(method, url, headers, body):
+        return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Error sending magic link email"}'
+    client = PoolClient("https://x.supabase.co", "anon", transport=transport)
+    with pytest.raises(PoolError) as info:
+        client.request_email_code("a@x.io")
+    assert not isinstance(info.value, PoolAuthError)
+
+
 def test_sign_in_refusal_names_the_gotrue_msg_envelope():
     """Current GoTrue answers 400 with ``msg`` + ``error_code``; the refusal
     must carry that text, not a bare "refused"."""
