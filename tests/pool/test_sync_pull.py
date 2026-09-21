@@ -150,3 +150,137 @@ class TestPull:
         assert report.errors
         assert report.added == []
         assert load_state(s.backup_dir)["pulledAt"] is None
+
+
+class TestOwnerLimitChangesReachExistingBorrowers:
+    """The owner's swap/hard limits used to be applied only when a row first
+    landed; a later `cswap pool share` never reached machines that already
+    held the login. The rule now: a borrower who left the owner's value alone
+    follows it both ways; a borrower's own stricter value survives; anything
+    looser than the owner's is pulled back down."""
+
+    def _land(self, sync_env, fake_pool, owner, borrower, *, swap, hard):
+        s, client, _ = sync_env
+        self.owner_session = fake_pool.session_for(owner)
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=swap, hard_limit=hard)
+        sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
+        assert sync.run_pass().added == ["1"]
+        return s, client, sync, row
+
+    @staticmethod
+    def _rule(s):
+        return rule_from_record(s._get_sequence_data()["accounts"]["1"])
+
+    def test_tightened_limits_reach_a_borrower_without_any_token_change(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=70.0, hard_limit=40.0)
+        report = sync.run_pass()
+        assert report.errors == [] and report.pulled == []   # same credential, only the limits moved
+        rule = self._rule(s)
+        assert (rule.swap_limit, rule.hard_limit, rule.priority) == (70.0, 40.0, 2)
+
+    def test_loosened_limits_reach_a_borrower_who_never_touched_them(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=None, hard_limit=None)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert rule.swap_limit is None and rule.hard_limit == 100.0
+
+    def test_limits_added_later_reach_a_borrower_who_landed_with_none(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=None, hard=None)
+        assert self._rule(s).hard_limit == 100.0
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=85.0, hard_limit=60.0)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.swap_limit, rule.hard_limit) == (85.0, 60.0)
+
+    def test_a_borrowers_stricter_choice_survives_until_the_owner_goes_lower(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        s.set_account_rule("1", hard_limit=30.0, quiet=True)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=40.0)
+        sync.run_pass()
+        assert self._rule(s).hard_limit == 30.0          # still the borrower's stricter 30
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=20.0)
+        sync.run_pass()
+        assert self._rule(s).hard_limit == 20.0          # the owner went below it
+
+    def test_a_looser_local_rule_is_pulled_back_at_the_next_row_update(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        s.set_account_rule("1", swap_limit=None, hard_limit=100.0, quiet=True)
+        # any update of the row will do; here the owner's machine pushes a rotation
+        blob = {"oauthAccount": {"accountUuid": "acct-o", "organizationUuid": "", "emailAddress": "acct-o@x.io"},
+                "claudeAiOauth": {"accessToken": "a-rt-2", "refreshToken": "rt-2", "expiresAt": 2_000}}
+        assert client.push_credential(self.owner_session, row.id, blob, 2_000, "sha256:r2", MID)
+        report = sync.run_pass()
+        assert report.pulled == ["1"]
+        rule = self._rule(s)
+        assert (rule.swap_limit, rule.hard_limit) == (80.0, 50.0)
+
+    def test_the_borrowers_priority_is_never_touched(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        s.set_account_rule("1", priority=5, quiet=True)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=70.0, hard_limit=40.0)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.swap_limit, rule.hard_limit, rule.priority) == (70.0, 40.0, 5)
+
+    def test_the_owners_own_machine_keeps_its_own_rule(self, sync_env, fake_pool, owner):
+        """Share limits are for borrowers; they are not the owner's rule."""
+        s, client, session = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        sync = PoolSync(s, client, session, machine_id=MID)
+        sync.run_pass()
+        s.set_account_rule("1", swap_limit=95.0, quiet=True)
+        client.update_sharing(session, row.id, shared=True, swap_limit=70.0, hard_limit=40.0)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.swap_limit, rule.hard_limit, rule.priority) == (95.0, 100.0, 1)
+
+    def test_an_unchanged_row_does_not_rewrite_the_roster(self, sync_env, fake_pool, owner, borrower):
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        before = s._get_sequence_data()["lastUpdated"]
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0)
+        sync.run_pass()
+        assert s._get_sequence_data()["lastUpdated"] == before
+
+
+class TestReconcileOwnerLimit:
+    """``None`` is "no limit". (current, previous, new) -> result."""
+
+    @pytest.mark.parametrize("current, previous, new, expected", [
+        (50.0, 50.0, 40.0, 40.0),     # untouched: follow the owner tighter
+        (50.0, 50.0, 80.0, 80.0),     # untouched: follow the owner looser
+        (50.0, 50.0, None, None),     # untouched: the owner lifted the limit
+        (None, None, 60.0, 60.0),     # untouched "no limit": the owner added one
+        (30.0, 50.0, 40.0, 30.0),     # borrower's stricter choice survives
+        (30.0, 50.0, 20.0, 20.0),     # ... until the owner goes below it
+        (30.0, 50.0, None, 30.0),     # ... and when the owner lifts the limit
+        (None, 50.0, 50.0, 50.0),     # looser than allowed: pulled back down
+        (90.0, 50.0, 60.0, 60.0),
+    ])
+    def test_with_a_remembered_previous_value(self, current, previous, new, expected):
+        from claude_swap.pool.sync import reconcile_owner_limit
+        assert reconcile_owner_limit(current, previous, new, previous_known=True) == expected
+
+    @pytest.mark.parametrize("current, new, expected", [
+        (50.0, 40.0, 40.0),
+        (50.0, 80.0, 50.0),           # cannot tell an override from the old value: stay strict
+        (None, 60.0, 60.0),
+        (50.0, None, 50.0),
+    ])
+    def test_a_record_landed_before_the_value_was_remembered(self, current, new, expected):
+        from claude_swap.pool.sync import reconcile_owner_limit
+        assert reconcile_owner_limit(current, None, new, previous_known=False) == expected
+
+
+def test_unlinking_a_slot_forgets_what_the_owner_allowed(sync_env, fake_pool, owner, borrower):
+    s, client, _ = sync_env
+    row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+    client.update_sharing(fake_pool.session_for(owner), row.id, shared=True, swap_limit=80.0, hard_limit=50.0)
+    PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID).run_pass()
+    record = s._get_sequence_data()["accounts"]["1"]
+    assert record["poolShareSwapLimit"] == 80.0 and record["poolShareHardLimit"] == 50.0
+    s.set_slot_pool_info("1", None, False)
+    record = s._get_sequence_data()["accounts"]["1"]
+    assert "poolShareSwapLimit" not in record and "poolShareHardLimit" not in record

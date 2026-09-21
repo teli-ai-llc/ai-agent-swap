@@ -392,7 +392,12 @@ machine never overwrites a fresh rotation. The pass runs inside `cswap auto`,
 the TUI, the menu bar panel, and `cswap sync`.
 
 Borrowed accounts arrive as priority 2 with the owner's swap and hard
-limits; your own accounts stay priority 1. When a login's refresh token dies
+limits; your own accounts stay priority 1. When the owner changes those
+limits (`cswap pool share` again), every machine that already holds the
+login follows on its next pass: a borrower who left the limits alone gets the
+new ones, tighter or looser; a borrower's own stricter `cswap rule` survives;
+anything looser than the owner allows is pulled back down. Priority is always
+the borrower's own. When a login's refresh token dies
 for good (it lapsed, or a real logout), whichever machine notices flags it,
 and the owner sees "your account … needs re-login" on `cswap list` and in
 the dashboard. The owner logs in with Claude Code and runs `cswap add`; the

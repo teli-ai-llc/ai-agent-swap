@@ -1970,6 +1970,9 @@ class ClaudeAccountSwitcher:
             else:
                 record.pop("poolAccountId", None)
                 record.pop("poolOwned", None)
+                # what the owner last allowed (pool/sync.py) means nothing unlinked
+                record.pop("poolShareSwapLimit", None)
+                record.pop("poolShareHardLimit", None)
             data["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, data)
 

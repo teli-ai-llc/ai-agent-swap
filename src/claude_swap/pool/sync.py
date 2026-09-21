@@ -27,6 +27,30 @@ POOL_STATE_FILENAME = "pool_state.json"
 _logger = logging.getLogger("claude-swap")
 
 
+#: What the owner allowed when this machine last applied the row's limits,
+#: kept on the borrowed slot's record so a later change can tell "the borrower
+#: never touched it" (follow the owner both ways) from "the borrower chose
+#: something stricter" (keep it). Absent on rows landed before 2026-09-21.
+_OWNER_SWAP_KEY = "poolShareSwapLimit"
+_OWNER_HARD_KEY = "poolShareHardLimit"
+_NO_LIMIT = float("inf")
+
+
+def reconcile_owner_limit(current: float | None, previous: float | None, new: float | None,
+                          *, previous_known: bool) -> float | None:
+    """A borrower's limit after the owner's moved from ``previous`` to ``new``.
+
+    ``None`` is "no limit" throughout. Untouched by the borrower (still equal
+    to what the owner last allowed) -> follow the owner, tighter or looser.
+    Otherwise -> the stricter of the two: a borrower's own stricter choice
+    survives, anything looser than the owner's is pulled back down.
+    """
+    if previous_known and current == previous:
+        return new
+    stricter = min(_NO_LIMIT if current is None else current, _NO_LIMIT if new is None else new)
+    return None if stricter == _NO_LIMIT else stricter
+
+
 @dataclass
 class PassReport:
     pushed: list[str] = field(default_factory=list)
@@ -280,6 +304,10 @@ class PoolSync:
             return
 
         record = data["accounts"][num]
+        if not mine:
+            # Independent of the credential: `cswap pool share` moves only the
+            # limits, and the row's updated_at still brings it here.
+            self._follow_owner_limits(num, row)
         if row.credential_version <= self._local_version(num, record, data):
             if self.switcher.slot_pool_info(num) == (None, False):
                 self.switcher.set_slot_pool_info(num, row.id, mine)
@@ -299,6 +327,39 @@ class PoolSync:
 
         if self._is_live_slot(record):
             self.switcher.switch_to(num, json_output=True, force=True)
+
+    def _follow_owner_limits(self, num: str, row: PoolAccountRow) -> None:
+        """Bring a borrowed slot's swap/hard limit in line with what the owner
+        allows now (``reconcile_owner_limit``). Priority is the borrower's own.
+        Writes the roster only when something actually changed."""
+        from claude_swap.locking import FileLock
+        from claude_swap.models import get_timestamp
+        from claude_swap.rules import apply_rule, rule_from_record
+
+        with FileLock(self.switcher.lock_file):
+            data = self.switcher._get_sequence_data() or {}
+            record = (data.get("accounts") or {}).get(num)
+            if record is None:
+                return
+            known = _OWNER_SWAP_KEY in record and _OWNER_HARD_KEY in record
+            rule = rule_from_record(record)
+            current_hard = None if rule.hard_limit >= 100.0 else rule.hard_limit
+            swap = reconcile_owner_limit(rule.swap_limit, record.get(_OWNER_SWAP_KEY),
+                                         row.share_swap_limit, previous_known=known)
+            hard = reconcile_owner_limit(current_hard, record.get(_OWNER_HARD_KEY),
+                                         row.share_hard_limit, previous_known=known)
+            unchanged = (
+                known and swap == rule.swap_limit and hard == current_hard
+                and record.get(_OWNER_SWAP_KEY) == row.share_swap_limit
+                and record.get(_OWNER_HARD_KEY) == row.share_hard_limit
+            )
+            if unchanged:
+                return
+            apply_rule(record, swap_limit=swap, hard_limit=100.0 if hard is None else hard)
+            record[_OWNER_SWAP_KEY] = row.share_swap_limit
+            record[_OWNER_HARD_KEY] = row.share_hard_limit
+            data["lastUpdated"] = get_timestamp()
+            self.switcher._write_json(self.switcher.sequence_file, data)
 
     def _land_new_row(self, row: PoolAccountRow, mine: bool,
                       creds_text: str, config_text: str) -> str:
@@ -324,6 +385,8 @@ class PoolSync:
             if not mine:
                 apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
                            hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0)
+                record[_OWNER_SWAP_KEY] = row.share_swap_limit
+                record[_OWNER_HARD_KEY] = row.share_hard_limit
             data.setdefault("accounts", {})[num] = record
             if int(num) not in data.setdefault("sequence", []):
                 data["sequence"].append(int(num))
