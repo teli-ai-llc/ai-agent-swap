@@ -12515,3 +12515,27 @@ class TestSessionShellGuardCoversEveryMutator:
         s = self._switcher(sample_sequence_data, monkeypatch)
         with pytest.raises(SwitchError):
             s.unset_alias("2")
+
+
+class TestFirstRunSetupWithoutATerminal:
+    """`cswap list` on an empty machine asks "add the current account? [Y/n]".
+    With no terminal attached (a script, a launchd job, an agent) ``input()``
+    raises EOFError: that is nobody answering, so it must not crash and must
+    not take the default "yes". Found 2026-09-21 on a freshly wiped machine."""
+
+    def test_eof_at_the_prompt_cancels_instead_of_crashing_or_adding(self, temp_home, capsys):
+        switcher = ClaudeAccountSwitcher()
+        with patch.object(switcher, "_get_current_account", return_value=("me@x.io", "")), \
+                patch("builtins.input", side_effect=EOFError), \
+                patch.object(switcher, "add_account") as add_account:
+            switcher._first_run_setup()
+        add_account.assert_not_called()
+        assert "cswap add" in capsys.readouterr().out
+
+    def test_enter_still_means_yes(self, temp_home):
+        switcher = ClaudeAccountSwitcher()
+        with patch.object(switcher, "_get_current_account", return_value=("me@x.io", "")), \
+                patch("builtins.input", return_value=""), \
+                patch.object(switcher, "add_account") as add_account:
+            switcher._first_run_setup()
+        add_account.assert_called_once()

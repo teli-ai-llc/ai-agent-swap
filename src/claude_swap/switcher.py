@@ -5903,10 +5903,17 @@ class ClaudeAccountSwitcher:
             return
         current_email, _ = identity
 
-        response = input(
-            f"No managed accounts found. Add current account "
-            f"({current_email}) to managed list? [Y/n] "
-        )
+        try:
+            response = input(
+                f"No managed accounts found. Add current account "
+                f"({current_email}) to managed list? [Y/n] "
+            )
+        except EOFError:
+            # No terminal attached (a script, launchd, an agent): nobody
+            # answered, so the default "yes" does not apply.
+            print()
+            print(dimmed("No terminal to ask on. Run 'cswap add' to manage the current account."))
+            return
         if response.lower() == "n":
             print(dimmed("Setup cancelled. You can run 'cswap --add-account' later."))
             return

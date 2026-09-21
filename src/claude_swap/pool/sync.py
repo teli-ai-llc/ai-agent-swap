@@ -145,20 +145,34 @@ class PoolSync:
                 out.append((str(num), record, account_id, owned))
         return out
 
+    def _is_live_slot(self, record: dict) -> bool:
+        """Whether Claude Code is logged in as this slot's account right now.
+
+        By identity (email + organization), never by the roster's recorded
+        ``activeAccountNumber``: a row that arrives by pull records none, yet
+        it can be the very login this machine is running on (a fresh machine
+        joining a pool that already holds its account). Same policy as
+        ``ClaudeAccountSwitcher.current_account_number``.
+        """
+        current = self.switcher._get_current_account()
+        return bool(
+            current
+            and current[0] == record.get("email", "")
+            and current[1] == (record.get("organizationUuid") or "")
+        )
+
     def _local_texts(self, num: str, record: dict, data: dict) -> tuple[str, str] | None:
-        """Freshest local (creds, config) for a slot: live bytes when active."""
+        """Freshest local (creds, config) for a slot: live bytes when it is the live login."""
         email = record.get("email", "")
         config_text = self.switcher._read_account_config(num, email)
         creds_text = None
-        if str(data.get("activeAccountNumber")) == num:
-            current = self.switcher._get_current_account()
-            if current and current[0] == email and current[1] == (record.get("organizationUuid") or ""):
-                active = self.switcher._read_active_credentials()
-                # A degraded read (Keychain locked, plaintext fallback served) may be
-                # a superseded generation -- never push it, fall through to the backup
-                # instead, same as `_refuse_degraded_capture` elsewhere in the repo.
-                if active.value and not active.degraded and not looks_like_api_key(active.value):
-                    creds_text = active.value
+        if self._is_live_slot(record):
+            active = self.switcher._read_active_credentials()
+            # A degraded read (Keychain locked, plaintext fallback served) may be
+            # a superseded generation -- never push it, fall through to the backup
+            # instead, same as `_refuse_degraded_capture` elsewhere in the repo.
+            if active.value and not active.degraded and not looks_like_api_key(active.value):
+                creds_text = active.value
         if not creds_text:
             # `_read_account_credentials` returns "" rather than raising when
             # the backup is missing or unreadable; a falsy result here just
@@ -283,10 +297,8 @@ class PoolSync:
         state["flagged"].pop(num, None)
         report.pulled.append(num)
 
-        if str(data.get("activeAccountNumber")) == num:
-            current = self.switcher._get_current_account()
-            if current and current[0] == email and current[1] == (record.get("organizationUuid") or ""):
-                self.switcher.switch_to(num, json_output=True, force=True)
+        if self._is_live_slot(record):
+            self.switcher.switch_to(num, json_output=True, force=True)
 
     def _land_new_row(self, row: PoolAccountRow, mine: bool,
                       creds_text: str, config_text: str) -> str:
@@ -294,6 +306,11 @@ class PoolSync:
         from claude_swap.models import get_timestamp
         from claude_swap.rules import apply_rule
 
+        # A teammate's first pass runs on a machine that has never added an
+        # account: no configs/, no credentials/, no sequence.json. Same
+        # preamble as ``add_account``; both calls are idempotent.
+        self.switcher._setup_directories()
+        self.switcher._init_sequence_file()
         with FileLock(self.switcher.lock_file):
             num = str(self.switcher._get_next_account_number())
             self.switcher._write_account_credentials(num, row.email, creds_text)

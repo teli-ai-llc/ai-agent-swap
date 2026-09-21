@@ -54,6 +54,31 @@ class TestLoginPool:
         assert settings.anon_key == wired.anon_key
         assert wired.machines
 
+    def test_first_login_on_a_machine_that_never_added_an_account(self, wired, owner, borrower):
+        """A brand-new teammate: cswap installed, nothing ever added, so the
+        backup directory has no configs/, no credentials/, no sequence.json.
+        The shared `_switcher()` fixture creates all three, which hid this:
+        found 2026-09-21 by wiping a real machine and logging in again —
+        "[Errno 2] No such file or directory: .../configs/.claude-config-1-…"."""
+        from claude_swap.models import Platform
+        from claude_swap.switcher import ClaudeAccountSwitcher
+
+        s = ClaudeAccountSwitcher()
+        s.platform = Platform.LINUX
+        assert not s.configs_dir.exists() and not s.sequence_file.exists()
+        client = client_mod.PoolClient(wired.base_url, wired.anon_key)
+        _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
+        _publish_row(wired, client, owner, "acct-o2", "rt-2", 1_000)
+
+        result = _login(wired, s, "borrower@x.io")
+
+        assert result.report.errors == []
+        assert result.report.added == ["1", "2"]
+        accounts = s._get_sequence_data()["accounts"]
+        assert [a["email"] for a in accounts.values()] == ["acct-o1@x.io", "acct-o2@x.io"]
+        assert s._read_account_config("1", "acct-o1@x.io")
+        assert s._read_account_credentials("1", "acct-o1@x.io")
+
     def test_login_pool_wrong_code_raises_auth_error(self, wired, owner):
         s = _switcher()
         request_login_code(wired.base_url, wired.anon_key, "owner@x.io")

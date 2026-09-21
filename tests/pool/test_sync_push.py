@@ -49,6 +49,41 @@ class TestPush:
         PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111").run_pass()
         assert fake_pool.row(row.id)["credential_version"] == 3_000
 
+    def test_live_login_pulled_from_the_pool_still_pushes_its_rotations(self, sync_env, fake_pool, owner, temp_home):
+        """A machine whose live Claude login is a pooled account it never
+        added locally: the row lands by pull, which records no
+        ``activeAccountNumber``. The slot is still the live one by identity,
+        so Claude Code's rotations must reach the pool — otherwise every
+        borrower's copy dies at the next refresh. Found 2026-09-21 on a wiped
+        real machine: the list showed the slot ACTIVE, the roster said None."""
+        s, client, session = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-1", "rt-1", 1_000)
+        # logged in to Claude Code as acct-1, with the same bytes the pool holds
+        (temp_home / ".claude.json").write_text(_config("acct-1@x.io", "acct-1"))
+        (temp_home / ".claude" / ".credentials.json").write_text(_creds("rt-1", 1_000))
+        sync = PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111")
+        assert sync.run_pass().added == ["1"]
+        assert s._get_sequence_data()["activeAccountNumber"] is None
+        # Claude Code rotates the live copy
+        (temp_home / ".claude" / ".credentials.json").write_text(_creds("rt-2", 2_000))
+        report = sync.run_pass()
+        assert report.pushed == ["1"]
+        assert fake_pool.row(row.id)["credential_version"] == 2_000
+
+    def test_recorded_active_number_never_makes_another_accounts_live_bytes_this_slots(
+        self, sync_env, fake_pool, owner, temp_home
+    ):
+        """The roster says slot 1 is active but Claude Code is logged in as
+        someone else: slot 1 pushes its own backup, never the live bytes."""
+        s, client, session = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-1", "rt-1", 1_000)
+        _seed(s, "1", "acct-1@x.io", "acct-1", "rt-2", 2_000, pool_id=row.id, owned=True)
+        (temp_home / ".claude.json").write_text(_config("other@x.io", "acct-other"))
+        (temp_home / ".claude" / ".credentials.json").write_text(_creds("rt-other", 9_000))
+        data = s._get_sequence_data(); data["activeAccountNumber"] = 1; s._write_json(s.sequence_file, data)
+        PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111").run_pass()
+        assert fake_pool.row(row.id)["credential_version"] == 2_000
+
     def test_degraded_live_read_falls_back_to_backup(self, sync_env, fake_pool, owner, temp_home, monkeypatch):
         s, client, session = sync_env
         row = _publish_row(fake_pool, client, owner, "acct-1", "rt-1", 1_000)
