@@ -2,6 +2,9 @@
 
 Multi-account switcher for Claude Code. Easily switch between multiple Claude accounts without logging out, or let it switch for you before you hit a rate limit. Track usage for every account in a live dashboard, and run accounts in parallel. Works with both the Claude Code CLI and the VS Code extension.
 
+> **Teli teammates:** this is our build with the shared team pool. Start with the
+> [Team pool guide](#team-pool-guide), not the PyPI install below.
+
 ## Installation
 
 ### Using uv (recommended)
@@ -47,6 +50,229 @@ pipx upgrade claude-swap
 ```
 
 After upgrading, a menu bar panel keeps the old build until you re-run `cswap panel --install-service`.
+
+## Team pool guide
+
+For teammates joining the shared pool: install, log in, share your login, and
+tune how much of it others may use.
+
+cswap switches Claude Code between accounts. The team pool lets us share our
+Claude logins, so when your account runs out of quota, cswap moves you onto a
+teammate's spare capacity automatically, and moves you back when yours resets.
+
+You stay in control of your own login: you decide whether it is shared and
+how much of it teammates may use.
+
+**Time needed:** about 5 minutes. **Works on:** macOS and Linux.
+
+### 1. Before you start
+
+- Claude Code is installed and you are signed in with **your own** account.
+- `uv` is installed. If not: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- You have your `@teli.ai` email inbox open. Login codes go there.
+
+### 2. Install
+
+Use our build. The `claude-swap` package on PyPI is the public upstream and
+has no pool feature.
+
+```bash
+uv tool install --force git+https://github.com/teli-ai-llc/ai-agent-swap.git
+cswap --version
+```
+
+`--force` also replaces an older or upstream copy if you had one.
+
+### 3. Log in to the pool
+
+Once per machine. No password, no invite: you get a one-time code by email.
+
+```bash
+cswap pool login \
+  --url <POOL_URL> \
+  --anon-key <ANON_KEY>
+```
+
+Get `<POOL_URL>` and `<ANON_KEY>` from the pinned message in the team Slack channel, or
+ask Austin. They are not in this README because this repository is public.
+
+1. Type your `@teli.ai` email.
+2. Check your inbox for an email from Supabase Auth with your sign-in code, and type the code.
+   It can land in spam the first time.
+3. You should see `Logged in to the pool as you@teli.ai (member)` and a line
+   like `pulled 3 account(s)`. Those are teammates' shared logins.
+
+The URL and key are saved, so later logins are just `cswap pool login`.
+Only `@teli.ai` addresses are accepted. Your account is created on first login.
+
+**This also turns off Claude Code's Remote Control on your machine.** The login
+writes `disableRemoteControl: true` into `~/.claude/settings.json`. Without it,
+a session you start while running on a teammate's login would show up in
+*their* claude.ai and they could drive it. Leave it off on any pooled machine.
+
+### 4. Share your own login
+
+While Claude Code is signed in as you:
+
+```bash
+cswap add --pool
+```
+
+Then set how much of it teammates may use. **Always pass both flags**; a flag
+you leave out is reset to "no limit".
+
+```bash
+cswap list                                         # find your slot number
+cswap pool share 1 --swap-limit 80 --hard-limit 50
+```
+
+- **hard limit 50** means teammates never use your login past 50% of its
+  5-hour or 7-day window. The rest stays yours.
+- **swap limit 80** is where a teammate's cswap starts looking for a better
+  account while it is on yours.
+- `--private` publishes it for your own machines only, not the team.
+- `cswap pool unshare 1` withdraws it. It disappears from teammates' machines.
+
+Have more than one Claude account? Sign in to Claude Code with each
+(`/login`), run `cswap add --pool`, and set its limits the same way.
+
+### 5. Keep it syncing in the background
+
+Claude logins rotate their tokens. Syncing is what keeps everyone's copy alive.
+
+```bash
+cswap sync --install-service      # macOS: runs at login, syncs every 30 s
+cswap panel --install-service     # optional: live dashboard in the menu bar ("CS")
+```
+
+On Linux, run `cswap sync` under systemd or your service manager of choice.
+
+### 6. Turn on automatic switching
+
+```bash
+cswap config set autoswitch.deadTokenStrikes 2   # recommended on pooled machines
+cswap auto                                       # foreground loop; leave it running
+```
+
+Or open the dashboard with `cswap` and choose **Auto-switch view**. In the
+menu bar app it is *Settings → Auto-switch accounts*.
+
+It switches when your active account reaches 90% of a window, and it is safe
+while Claude Code is working. Your own accounts are priority 1. Borrowed ones
+are priority 2, so they are used only when yours are out, and cswap returns to
+yours as soon as they have room.
+
+### Everyday commands
+
+| I want to | Command |
+|---|---|
+| See every account and its usage | `cswap list` |
+| Open the dashboard | `cswap` |
+| See who I am in the pool and what is linked | `cswap pool status` |
+| Switch to the account with the most quota | `cswap switch --strategy best` |
+| Switch to a specific account | `cswap switch 3` |
+| See which account is active | `cswap status` |
+| Force a sync right now | `cswap sync --once` |
+
+### Adjusting things
+
+**How much teammates may use of MY login.** Re-run share with both flags:
+
+```bash
+cswap pool share 1 --swap-limit 70 --hard-limit 40
+cswap pool share 1 --swap-limit off --hard-limit off     # no limits
+```
+
+New limits reach every teammate's machine on its next sync, within about 30
+seconds. Nobody has to do anything.
+
+**How much I use of a BORROWED login.** Borrowed logins arrive with the
+owner's limits and follow the owner's later changes. You can make yours
+stricter and it will stick. A looser value is pulled back to the owner's
+limit at the next sync of that login.
+
+```bash
+cswap rule                                   # show every account's rule
+cswap rule 4 --hard-limit 30                 # use slot 4 only to 30%
+```
+
+**My own accounts.**
+
+```bash
+cswap rule 1 --swap-limit 95                 # leave my main account a bit later
+cswap rule 2 --priority 2 --hard-limit 50    # treat my second account as a backup
+cswap rule 2 --reset                         # back to defaults
+```
+
+**When auto-switch kicks in, for every account.**
+
+```bash
+cswap config                                 # show all settings
+cswap config set autoswitch.threshold 80     # switch earlier (default 90)
+cswap config set autoswitch.model Fable      # also switch on the Fable weekly limit
+cswap config set autoswitch.strategy consume-first   # burn soonest-resetting quota first
+```
+
+**Rest an account without removing it.**
+
+```bash
+cswap disable 3
+cswap enable 3
+```
+
+### Rules of the road
+
+- **Never run `/logout` in Claude Code while on a borrowed login.** A real
+  logout kills that login for its owner and for everyone else. To change
+  accounts use `cswap switch`. To add another account of your own use `/login`.
+- Anyone in the pool can technically read a shared login's token. Share only
+  accounts you are fine with teammates using.
+- Respect the owner's limits. They are honoured by your cswap, not the server.
+- Keep Remote Control off on any machine that is logged in to the pool.
+
+### When something needs attention
+
+**"your account … needs re-login".** Your login's token died (it lapsed, or
+someone logged out). Sign in to Claude Code as that account, then:
+
+```bash
+cswap add
+```
+
+The fresh login flows to everyone within about 30 seconds.
+
+**"the pool's mailer is rate limited".** The pool sends only a few emails per
+hour. Wait a few minutes and run `cswap pool login` again.
+
+**"Token has expired or is invalid".** The code was mistyped or is more than a
+few minutes old. Run `cswap pool login` again for a new one.
+
+**"its allowed email domains do not include yours".** Use your `@teli.ai`
+address.
+
+**"Remote Control is not disabled…" in `cswap pool status`.** Someone removed
+the setting. Run `cswap pool login` again to restore it.
+
+**Anything else.** Run the command again with `--debug`, and check
+`~/.claude-swap-backup/claude-swap.log`. Send both to Austin.
+
+### Updating the team build
+
+```bash
+uv tool install --force git+https://github.com/teli-ai-llc/ai-agent-swap.git
+cswap panel --install-service     # only if you use the panel: rebuilds it for the new version
+```
+
+### Leaving the pool
+
+```bash
+cswap pool unshare 1      # optional: withdraw your login from the team first
+cswap pool logout         # signs out and removes borrowed logins from this machine
+```
+
+`cswap pool logout --keep` signs out but leaves the borrowed logins in place.
+Remote Control stays disabled; re-enable it in `~/.claude/settings.json` if
+you want it back.
 
 ## Usage
 
@@ -371,9 +597,10 @@ If an imported account is the one you're currently logged in as, activate the im
 
 A pool is a Supabase project that holds each member's Claude logins so a
 login rotated on any machine reaches every other machine before its copy
-dies. The admin sets it up once (see `supabase/README.md`); after that,
-teammates sign themselves in with their work email and a one-time code
-from their inbox. No passwords, no invites.
+dies. The admin sets it up once (see [`supabase/README.md`](supabase/README.md));
+after that, teammates sign themselves in with their work email and a one-time
+code. No passwords, no invites. The full walkthrough is the
+[Team pool guide](#team-pool-guide) below.
 
 ```bash
 cswap pool login                     # once per machine: pool URL, anon key, email, then the emailed code
@@ -385,7 +612,9 @@ cswap sync --install-service         # macOS: keep syncing at login (else: cswap
 cswap pool logout                    # drops the session and the borrowed accounts
 ```
 
-How it works: every 30 s (`pool.pollIntervalSeconds`) a pass pushes any
+#### How it works
+
+Every 30 s (`pool.pollIntervalSeconds`) a pass pushes any
 pooled login whose refresh token changed here and pulls newer ones from the
 pool. A push only lands if it is newer than what the pool holds, so a slow
 machine never overwrites a fresh rotation. The pass runs inside `cswap auto`,
