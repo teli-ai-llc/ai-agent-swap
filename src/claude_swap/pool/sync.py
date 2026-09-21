@@ -298,9 +298,10 @@ class PoolSync:
         creds_text, config_text = blob_to_local(row.credential)
 
         if num is None:
-            num = self._land_new_row(row, mine, creds_text, config_text)
+            num, created = self._land_new_row(row, mine, creds_text, config_text)
             state["pushed"][num] = credential_fingerprint(creds_text) or ""
-            report.added.append(num)
+            if created:
+                report.added.append(num)
             return
 
         record = data["accounts"][num]
@@ -362,7 +363,17 @@ class PoolSync:
             self.switcher._write_json(self.switcher.sequence_file, data)
 
     def _land_new_row(self, row: PoolAccountRow, mine: bool,
-                      creds_text: str, config_text: str) -> str:
+                      creds_text: str, config_text: str) -> tuple[str, bool]:
+        """Put a pool row into a free slot. Returns ``(slot, created)``.
+
+        ``_apply_row`` decides "this row has no slot yet" before taking the
+        roster lock, and several surfaces run passes on one machine (the
+        launchd ``cswap sync`` service, the TUI, the menu bar panel). Two of
+        them could therefore both decide it and each land the same row in a
+        slot of its own — one teammate's account listed twice. The decision is
+        made again here, under the lock, and a row that another pass just
+        landed returns that slot with ``created=False``.
+        """
         from claude_swap.locking import FileLock
         from claude_swap.models import get_timestamp
         from claude_swap.rules import apply_rule
@@ -373,6 +384,9 @@ class PoolSync:
         self.switcher._setup_directories()
         self.switcher._init_sequence_file()
         with FileLock(self.switcher.lock_file):
+            landed = self._slot_for_row(self.switcher._get_sequence_data() or {}, row)
+            if landed is not None:
+                return landed, False
             num = str(self.switcher._get_next_account_number())
             self.switcher._write_account_credentials(num, row.email, creds_text)
             self.switcher._write_account_config(num, row.email, config_text)
@@ -393,7 +407,7 @@ class PoolSync:
                 data["sequence"].sort()
             data["lastUpdated"] = get_timestamp()
             self.switcher._write_json(self.switcher.sequence_file, data)
-        return num
+        return num, True
 
     # -- status -------------------------------------------------------------------
     def _status(self, report: PassReport, state: dict) -> None:

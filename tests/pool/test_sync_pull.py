@@ -284,3 +284,58 @@ def test_unlinking_a_slot_forgets_what_the_owner_allowed(sync_env, fake_pool, ow
     s.set_slot_pool_info("1", None, False)
     record = s._get_sequence_data()["accounts"]["1"]
     assert "poolShareSwapLimit" not in record and "poolShareHardLimit" not in record
+
+
+class TestConcurrentPassesNeverDuplicateASlot:
+    """Two sync surfaces run on one machine (the launchd `cswap sync` service,
+    the TUI, the menu bar panel). `_apply_row` decides "this row has no slot
+    yet" *before* taking the roster lock, so two passes could both decide it
+    and both land the same pool row in a slot of its own.
+
+    Seen live 2026-09-21: slots 4 and 5 both carried pool row
+    f032e319… with the same `added` second, showing one teammate's account
+    twice in `cswap list`."""
+
+    def test_landing_a_row_twice_reuses_the_slot(self, sync_env, fake_pool, owner, borrower):
+        s, client, _ = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
+        assert sync.run_pass().added == ["1"]
+
+        # the racing pass: it read the roster before the first pass wrote it,
+        # so its own `_slot_for_row` said None too.
+        creds, config = sync.client.get_account(sync.session, row.id).credential, None
+        from claude_swap.pool.blob import blob_to_local
+        creds_text, config_text = blob_to_local(fake_pool.row(row.id)["credential"])
+        num, created = sync._land_new_row(row, False, creds_text, config_text)
+        assert (num, created) == ("1", False)
+        accounts = s._get_sequence_data()["accounts"]
+        assert list(accounts) == ["1"]
+        assert accounts["1"]["poolAccountId"] == row.id
+
+    def test_a_racing_pass_reports_nothing_added(self, sync_env, fake_pool, owner, borrower, monkeypatch):
+        s, client, _ = sync_env
+        _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
+        assert sync.run_pass().added == ["1"]
+
+        # The race, exactly: the check in `_apply_row` reads a roster written
+        # before the other pass landed the row (stale -> None); the re-check
+        # under the lock reads the current one.
+        real = PoolSync._slot_for_row
+        seen = {"outer": False}
+
+        def stale_once(self, data, row):
+            if not seen["outer"]:
+                seen["outer"] = True
+                return None
+            return real(self, data, row)
+
+        monkeypatch.setattr(PoolSync, "_slot_for_row", stale_once)
+        state = load_state(s.backup_dir)
+        state["pulledAt"] = None          # make it look at the row again
+        from claude_swap.pool.sync import save_state
+        save_state(s.backup_dir, state)
+        report = sync.run_pass()
+        assert report.added == [] and report.errors == []
+        assert list(s._get_sequence_data()["accounts"]) == ["1"]
