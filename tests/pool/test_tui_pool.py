@@ -17,6 +17,7 @@ import claude_swap.pool.sync as pool_sync
 from claude_swap.tui.modals import (
     ConfirmModal,
     OutputModal,
+    PoolCodeModal,
     PoolLoginForm,
     PoolLoginModal,
     PoolShareForm,
@@ -70,7 +71,7 @@ class TestPoolLoginModal:
             assert screen.query_one("#anon-key", Input).value == "anon-key-123"
             # the anon key is not shoulder-surfable
             assert screen.query_one("#anon-key", Input).password is True
-            assert screen.query_one("#password", Input).password is True
+            assert not screen.query(Input).filter("#password")  # codes replaced passwords
 
     async def test_returns_form_on_valid_input(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
@@ -82,8 +83,7 @@ class TestPoolLoginModal:
             screen = pilot.app.screen
             screen.query_one("#url", Input).value = "https://pool.example.com/"
             screen.query_one("#anon-key", Input).value = "anon-key-123"
-            screen.query_one("#email", Input).value = "member@example.com"
-            screen.query_one("#password", Input).value = "hunter2"
+            screen.query_one("#email", Input).value = " Member@example.com "
             await pilot.click("#login")
             await pilot.pause()
             assert results == [
@@ -91,7 +91,6 @@ class TestPoolLoginModal:
                     url="https://pool.example.com",
                     anon_key="anon-key-123",
                     email="member@example.com",
-                    password="hunter2",
                 )
             ]
 
@@ -119,7 +118,7 @@ class TestPoolLoginModal:
             assert styles.align_horizontal == "center"
             assert styles.align_vertical == "middle"
 
-    async def test_blank_email_or_password_refused_with_error(self, tmp_path):
+    async def test_blank_email_refused_with_error(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
         app = make_app(fake)
         async with app.run_test(size=(100, 32)) as pilot:
@@ -130,7 +129,7 @@ class TestPoolLoginModal:
             )
             await pilot.pause()
             screen = pilot.app.screen
-            # email and password left blank
+            # email left blank
             await pilot.click("#login")
             await pilot.pause()
             assert isinstance(pilot.app.screen, PoolLoginModal)  # still open
@@ -138,31 +137,46 @@ class TestPoolLoginModal:
             error = screen.query_one("#form-error", Static).render()
             assert str(getattr(error, "plain", error)) != ""
 
-    async def test_password_is_returned_verbatim_not_stripped(self, tmp_path):
+class TestPoolCodeModal:
+    async def test_names_the_inbox_and_returns_the_code_without_spaces(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
         app = make_app(fake)
         async with app.run_test(size=(100, 32)) as pilot:
-            results: list[PoolLoginForm | None] = []
-            app.push_screen(
-                PoolLoginModal("https://pool.example.com", "anon-key-123"),
-                results.append,
-            )
+            results: list[str | None] = []
+            app.push_screen(PoolCodeModal("member@example.com"), results.append)
             await pilot.pause()
             screen = pilot.app.screen
-            screen.query_one("#url", Input).value = "https://pool.example.com/"
-            screen.query_one("#anon-key", Input).value = "anon-key-123"
-            screen.query_one("#email", Input).value = "member@example.com"
-            screen.query_one("#password", Input).value = " sp ace "
+            body = screen.query_one(".modal-body", Static).render()
+            assert "member@example.com" in str(getattr(body, "plain", body))
+            screen.query_one("#code", Input).value = " 123 456 "
+            await pilot.press("enter")
+            await pilot.pause()
+            assert results == ["123456"]
+
+    async def test_blank_code_refused_with_error(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[str | None] = []
+            app.push_screen(PoolCodeModal("member@example.com"), results.append)
+            await pilot.pause()
             await pilot.click("#login")
             await pilot.pause()
-            assert results == [
-                PoolLoginForm(
-                    url="https://pool.example.com",
-                    anon_key="anon-key-123",
-                    email="member@example.com",
-                    password=" sp ace ",
-                )
-            ]
+            assert isinstance(pilot.app.screen, PoolCodeModal)
+            assert results == []
+            error = pilot.app.screen.query_one("#form-error", Static).render()
+            assert str(getattr(error, "plain", error)) != ""
+
+    async def test_escape_dismisses_none(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[str | None] = []
+            app.push_screen(PoolCodeModal("member@example.com"), results.append)
+            await pilot.pause()
+            await pilot.press("escape")
+            await pilot.pause()
+            assert results == [None]
 
 
 class TestPoolShareModal:
@@ -396,21 +410,24 @@ class TestPoolMenu:
 
 
 class TestPoolLoginAction:
-    async def test_login_calls_login_pool_and_shows_output_never_the_password(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_login_requests_a_code_then_logs_in_with_it(self, tmp_path, monkeypatch):
         monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
-        calls = []
+        requests, logins = [], []
 
-        def fake_login(switcher, url, anon_key, email, password):
-            calls.append((url, anon_key, email, password))
+        def fake_request(url, anon_key, email):
+            requests.append((url, anon_key, email))
+
+        def fake_login(switcher, url, anon_key, email, code):
+            logins.append((url, anon_key, email, code))
             return pool_cli.LoginResult(
                 email=email,
                 role="member",
                 report=pool_sync.PassReport(pushed=["1"]),
                 suggest_strikes=False,
+                guard_applied=("disableRemoteControl",),
             )
 
+        monkeypatch.setattr(pool_cli, "request_login_code", fake_request)
         monkeypatch.setattr(pool_cli, "login_pool", fake_login)
 
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
@@ -423,21 +440,67 @@ class TestPoolLoginAction:
             app.screen.query_one("#url", Input).value = "https://pool.example.com"
             app.screen.query_one("#anon-key", Input).value = "anon-key-123"
             app.screen.query_one("#email", Input).value = "member@example.com"
-            app.screen.query_one("#password", Input).value = "hunter2"
             await pilot.click("#login")
             await settle(pilot)
-            assert calls == [
-                (
-                    "https://pool.example.com",
-                    "anon-key-123",
-                    "member@example.com",
-                    "hunter2",
-                )
-            ]
+            assert requests == [("https://pool.example.com", "anon-key-123", "member@example.com")]
+            assert logins == []
+            assert isinstance(app.screen, PoolCodeModal)
+            app.screen.query_one("#code", Input).value = "123456"
+            await pilot.click("#login")
+            await settle(pilot)
+            assert logins == [("https://pool.example.com", "anon-key-123", "member@example.com", "123456")]
             assert isinstance(app.screen, OutputModal)
             output = _output_text(app)
             assert "Logged in as member@example.com" in output
-            assert "hunter2" not in output
+            assert "Remote Control disabled" in output
+
+    async def test_a_refused_code_request_shows_the_error_and_no_code_modal(self, tmp_path, monkeypatch):
+        from claude_swap.exceptions import PoolAuthError
+
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+
+        def fake_request(url, anon_key, email):
+            raise PoolAuthError("the pool refused to create a login for x@y: its allowed email domains do not include yours")
+
+        monkeypatch.setattr(pool_cli, "request_login_code", fake_request)
+        monkeypatch.setattr(pool_cli, "login_pool", lambda *a: pytest.fail("login_pool must not run"))
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-login")
+            app.screen.query_one("#url", Input).value = "https://pool.example.com"
+            app.screen.query_one("#anon-key", Input).value = "anon-key-123"
+            app.screen.query_one("#email", Input).value = "x@y"
+            await pilot.click("#login")
+            await settle(pilot)
+            assert isinstance(app.screen, OutputModal)
+            assert "email domains" in _output_text(app)
+            assert app.busy is False
+
+    async def test_cancelling_the_code_modal_logs_nothing_in(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: False)
+        monkeypatch.setattr(pool_cli, "request_login_code", lambda url, anon_key, email: None)
+        monkeypatch.setattr(pool_cli, "login_pool", lambda *a: pytest.fail("login_pool must not run"))
+
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            await settle(pilot)
+            await menu_select(pilot, "pool-menu")
+            await menu_select(pilot, "pool-login")
+            app.screen.query_one("#url", Input).value = "https://pool.example.com"
+            app.screen.query_one("#anon-key", Input).value = "anon-key-123"
+            app.screen.query_one("#email", Input).value = "member@example.com"
+            await pilot.click("#login")
+            await settle(pilot)
+            assert isinstance(app.screen, PoolCodeModal)
+            await pilot.press("escape")
+            await settle(pilot)
+            assert not isinstance(app.screen, (PoolCodeModal, OutputModal))
+            assert app.busy is False
 
     async def test_login_prefills_from_pool_settings(self, tmp_path, monkeypatch):
         import json
@@ -468,7 +531,7 @@ class TestPoolLoginAction:
         state = {"logged_in": False}
         monkeypatch.setattr(pool_cli, "pool_logged_in", lambda switcher: state["logged_in"])
 
-        def fake_login(switcher, url, anon_key, email, password):
+        def fake_login(switcher, url, anon_key, email, code):
             state["logged_in"] = True
             return pool_cli.LoginResult(
                 email=email,
@@ -477,6 +540,7 @@ class TestPoolLoginAction:
                 suggest_strikes=False,
             )
 
+        monkeypatch.setattr(pool_cli, "request_login_code", lambda url, anon_key, email: None)
         monkeypatch.setattr(pool_cli, "login_pool", fake_login)
 
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
@@ -489,7 +553,10 @@ class TestPoolLoginAction:
             app.screen.query_one("#url", Input).value = "https://pool.example.com"
             app.screen.query_one("#anon-key", Input).value = "anon-key-123"
             app.screen.query_one("#email", Input).value = "member@example.com"
-            app.screen.query_one("#password", Input).value = "hunter2"
+            await pilot.click("#login")
+            await settle(pilot)
+            assert isinstance(app.screen, PoolCodeModal)
+            app.screen.query_one("#code", Input).value = "123456"
             await pilot.click("#login")
             await settle(pilot)
             assert isinstance(app.screen, OutputModal)

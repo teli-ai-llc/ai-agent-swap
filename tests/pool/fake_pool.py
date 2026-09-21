@@ -45,6 +45,14 @@ class FakePool:
     calls: list[tuple[str, str]] = field(default_factory=list)
     clock: object = time.time
     offline: bool = False
+    #: Email-code sign-in (``/auth/v1/otp`` + ``/auth/v1/verify``). A domain
+    #: list mirrors the ``pool_signup_guard`` trigger: when non-empty, a
+    #: first-time email outside it fails the way GoTrue reports a trigger
+    #: exception; when empty, anyone is created (signups open, no guard).
+    signup_domains: list[str] = field(default_factory=list)
+    codes: dict[str, str] = field(default_factory=dict)          # email -> pending code
+    sent_codes: list[str] = field(default_factory=list)          # every email a code went to
+    mailer_limited: bool = False                                 # 429 on /otp
 
     # -- setup helpers ------------------------------------------------------
     def add_member(self, email: str, password: str = "pw", *, role: str = "member",
@@ -81,6 +89,10 @@ class FakePool:
             return 401, b'{"message":"bad apikey"}'
         if parts.path == "/auth/v1/token":
             return self._auth(params.get("grant_type"), payload)
+        if parts.path == "/auth/v1/otp":
+            return self._otp(payload or {})
+        if parts.path == "/auth/v1/verify":
+            return self._verify(payload or {})
         if parts.path.startswith("/rest/v1/"):
             auth = headers.get("Authorization", "")
             jwt = auth.removeprefix("Bearer ").strip()
@@ -102,6 +114,36 @@ class FakePool:
                 return 400, b'{"error":"invalid_grant","error_description":"Invalid Refresh Token"}'
             return 200, self._token_response(self.users[user_id])
         return 400, b'{"error":"unsupported_grant_type"}'
+
+    def _otp(self, payload: dict):
+        email = (payload.get("email") or "").strip().lower()
+        if not email or "@" not in email:
+            return 400, b'{"code":400,"error_code":"validation_failed","msg":"Unable to validate email address: invalid format"}'
+        if self.mailer_limited:
+            return 429, b'{"code":429,"error_code":"over_email_send_rate_limit","msg":"email rate limit exceeded"}'
+        user = next((u for u in self.users.values() if u.email == email), None)
+        if user is None:
+            if not payload.get("create_user", True):
+                return 422, b'{"code":422,"error_code":"otp_disabled","msg":"Signups not allowed for otp"}'
+            domain = email.rsplit("@", 1)[1]
+            if self.signup_domains and domain not in self.signup_domains:
+                # GoTrue never surfaces the trigger's message, only this.
+                return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Database error saving new user"}'
+            self.add_member(email, password="")
+        code = f"{len(self.sent_codes) + 1:06d}"
+        self.codes[email] = code
+        self.sent_codes.append(email)
+        return 200, b"{}"
+
+    def _verify(self, payload: dict):
+        email = (payload.get("email") or "").strip().lower()
+        if payload.get("type") != "email":
+            return 400, b'{"code":400,"error_code":"validation_failed","msg":"Verify requires a verification type"}'
+        if email and self.codes.get(email) == payload.get("token"):
+            del self.codes[email]
+            user = next(u for u in self.users.values() if u.email == email)
+            return 200, self._token_response(user)
+        return 403, b'{"code":403,"error_code":"otp_expired","msg":"Token has expired or is invalid"}'
 
     def _token_response(self, user: FakeUser) -> bytes:
         jwt = f"jwt-{uuid.uuid4()}"

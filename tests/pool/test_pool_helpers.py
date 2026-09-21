@@ -7,6 +7,7 @@ import pytest
 from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
 from claude_swap.pool import client as client_mod
 from claude_swap.pool.cli import (
+    request_login_code,
     apply_pooled_defaults,
     login_pool,
     logout_pool,
@@ -29,13 +30,20 @@ def wired(fake_pool, monkeypatch, temp_home):
     return fake_pool
 
 
+def _login(wired, switcher, email: str):
+    """The two-step login: request the code, then log in with the one the
+    fake pool "sent"."""
+    request_login_code(wired.base_url, wired.anon_key, email)
+    return login_pool(switcher, wired.base_url, wired.anon_key, email, wired.codes[email])
+
+
 class TestLoginPool:
     def test_login_pool_returns_member_and_pulls(self, wired, owner, borrower):
         s = _switcher()
         client = client_mod.PoolClient(wired.base_url, wired.anon_key)
         _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
 
-        result = login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        result = _login(wired, s, "borrower@x.io")
 
         assert result.email == "borrower@x.io"
         assert result.role == "member"
@@ -46,19 +54,21 @@ class TestLoginPool:
         assert settings.anon_key == wired.anon_key
         assert wired.machines
 
-    def test_login_pool_bad_password_raises_auth_error(self, wired, owner):
+    def test_login_pool_wrong_code_raises_auth_error(self, wired, owner):
         s = _switcher()
+        request_login_code(wired.base_url, wired.anon_key, "owner@x.io")
         with pytest.raises(PoolAuthError):
             login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "wrong")
+        assert load_session(s.backup_dir) is None
 
     def test_login_pool_suggests_strikes_only_when_low(self, wired, owner):
         s = _switcher()
-        result = login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        result = _login(wired, s, "owner@x.io")
         assert result.suggest_strikes is True
 
         s2 = _switcher()
         set_setting(s2.backup_dir, "autoswitch.deadTokenStrikes", "2")
-        result2 = login_pool(s2, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        result2 = _login(wired, s2, "owner@x.io")
         assert result2.suggest_strikes is False
 
 
@@ -69,7 +79,7 @@ class TestLogoutPool:
         _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
         _publish_row(wired, client, owner, "acct-o2", "rt-2", 1_000)
         _publish_row(wired, client, borrower, "acct-b", "rt-b", 1_000)
-        login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        _login(wired, s, "borrower@x.io")
 
         result = logout_pool(s, keep=False)
         assert sorted(result.removed) == ["1", "2"]
@@ -84,7 +94,7 @@ class TestLogoutPool:
         _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
         _publish_row(wired, client, owner, "acct-o2", "rt-2", 1_000)
         _publish_row(wired, client, borrower, "acct-b", "rt-b", 1_000)
-        login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        _login(wired, s, "borrower@x.io")
 
         result = logout_pool(s, keep=True)
         assert result.removed == []
@@ -95,7 +105,7 @@ class TestLogoutPool:
         s = _switcher()
         client = client_mod.PoolClient(wired.base_url, wired.anon_key)
         _publish_row(wired, client, owner, "acct-o1", "rt-1", 1_000)
-        login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        _login(wired, s, "borrower@x.io")
 
         def fake_remove(identifier, assume_yes=False, quiet=False):
             raise ClaudeSwitchError("live")
@@ -121,14 +131,14 @@ class TestLogoutPool:
         client = client_mod.PoolClient(wired.base_url, wired.anon_key)
         _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
 
-        result1 = login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        result1 = _login(wired, s, "borrower@x.io")
         assert result1.report.added == ["1"]
 
         logout_result = logout_pool(s, keep=False)
         assert logout_result.removed == ["1"]
         assert "1" not in (s._get_sequence_data().get("accounts") or {})
 
-        result2 = login_pool(s, wired.base_url, wired.anon_key, "borrower@x.io", "pw-borrower")
+        result2 = _login(wired, s, "borrower@x.io")
         assert result2.report.added == ["1"]
         assert "1" in (s._get_sequence_data().get("accounts") or {})
 
@@ -146,7 +156,7 @@ class TestStatusLines:
 
         client = client_mod.PoolClient(wired.base_url, wired.anon_key)
         _publish_row(wired, client, owner, "acct-o", "rt-1", 1_000)
-        login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        _login(wired, s, "owner@x.io")
 
         from claude_swap.pool.sync import load_state, save_state
 
@@ -178,5 +188,5 @@ class TestPoolLoggedIn:
     def test_pool_logged_in(self, wired, owner):
         s = _switcher()
         assert pool_logged_in(s) is False
-        login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "pw-owner")
+        _login(wired, s, "owner@x.io")
         assert pool_logged_in(s) is True

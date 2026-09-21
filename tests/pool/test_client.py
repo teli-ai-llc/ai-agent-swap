@@ -39,6 +39,56 @@ class TestAuth:
         with pytest.raises(PoolAuthError):
             _client(fake_pool).sign_in_password("owner@x.io", "nope")
 
+    def test_email_code_round_trip(self, fake_pool, owner):
+        client = _client(fake_pool)
+        client.request_email_code("owner@x.io")
+        assert fake_pool.sent_codes == ["owner@x.io"]
+        s = client.verify_email_code("owner@x.io", fake_pool.codes["owner@x.io"])
+        assert s.user_id == owner.user_id and s.email == "owner@x.io"
+        assert s.expires_at > 0
+
+    def test_email_code_creates_a_first_time_member(self, fake_pool):
+        fake_pool.signup_domains = ["x.io"]
+        client = _client(fake_pool)
+        client.request_email_code("New.Person@x.io")
+        s = client.verify_email_code("New.Person@x.io", fake_pool.codes["new.person@x.io"])
+        assert s.email == "new.person@x.io"
+        assert client.member(s)["role"] == "member"
+
+    def test_email_code_outside_allowed_domains_is_explained(self, fake_pool):
+        fake_pool.signup_domains = ["x.io"]
+        with pytest.raises(PoolAuthError, match="email domain"):
+            _client(fake_pool).request_email_code("stranger@evil.example")
+        assert fake_pool.sent_codes == []
+
+    def test_email_code_wrong_or_stale(self, fake_pool, owner):
+        client = _client(fake_pool)
+        client.request_email_code("owner@x.io")
+        with pytest.raises(PoolAuthError, match="expired or is invalid"):
+            client.verify_email_code("owner@x.io", "000000")
+        # the right code still works after a wrong guess
+        client.verify_email_code("owner@x.io", fake_pool.codes["owner@x.io"])
+        # ... but only once
+        with pytest.raises(PoolAuthError):
+            client.verify_email_code("owner@x.io", "000001")
+
+    def test_email_code_is_whitespace_tolerant(self, fake_pool, owner):
+        client = _client(fake_pool)
+        client.request_email_code(" owner@x.io ")
+        code = fake_pool.codes["owner@x.io"]
+        client.verify_email_code("owner@x.io", f" {code[:3]} {code[3:]}\n")
+
+    def test_mailer_rate_limit_is_a_pool_error_with_advice(self, fake_pool, owner):
+        fake_pool.mailer_limited = True
+        with pytest.raises(PoolError, match="rate limit") as info:
+            _client(fake_pool).request_email_code("owner@x.io")
+        assert not isinstance(info.value, PoolAuthError)
+
+    def test_email_code_offline_is_pool_error(self, fake_pool, owner):
+        fake_pool.offline = True
+        with pytest.raises(PoolError, match="unreachable"):
+            _client(fake_pool).request_email_code("owner@x.io")
+
     def test_ensure_fresh_refreshes_near_expiry(self, fake_pool, owner):
         now = [1_000_000.0]
         fake_pool.clock = lambda: now[0]

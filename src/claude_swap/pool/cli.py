@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import platform
 import sys
@@ -13,6 +12,7 @@ from dataclasses import dataclass
 from claude_swap import __version__
 from claude_swap.exceptions import ClaudeSwitchError, PoolError
 from claude_swap.pool.client import PoolClient
+from claude_swap.pool.guard import enforce_remote_control_guard, remote_control_guard_gaps
 from claude_swap.pool.session import clear_session, load_session, machine_id, save_session
 from claude_swap.pool.sync import POOL_SCHEMA_VERSION, PassReport, PoolSync, _ago, build_sync, load_state, reset_state
 from claude_swap.printer import accent, bolded, dimmed, error as print_error, warning as print_warning, yellowed
@@ -58,6 +58,7 @@ class LoginResult:
     role: str
     report: PassReport
     suggest_strikes: bool          # True when autoswitch.deadTokenStrikes < 2
+    guard_applied: tuple[str, ...] = ()   # Remote Control guard keys this login had to write
 
 
 @dataclass(frozen=True)
@@ -67,20 +68,30 @@ class LogoutResult:
     unlinked: list[str]            # owned slots unlinked
 
 
-def login_pool(switcher: ClaudeAccountSwitcher, url: str, anon_key: str, email: str, password: str) -> LoginResult:
-    """Sign in, check schema, load the member row, register this machine,
+def request_login_code(url: str, anon_key: str, email: str) -> None:
+    """Step one of a login: have the pool email ``email`` a one-time code.
+    A first-time address is signed up on the spot when the pool's signup
+    domains allow it. Raises PoolError/PoolAuthError; persists nothing."""
+    PoolClient(url, anon_key).request_email_code(email)
+
+
+def login_pool(switcher: ClaudeAccountSwitcher, url: str, anon_key: str, email: str, code: str) -> LoginResult:
+    """Step two: exchange the emailed code for a session, check schema, load
+    the member row, register this machine, enforce the Remote Control guard,
     save the session, persist pool.url/pool.anonKey, then run one sync pass.
 
     Raises PoolError/PoolAuthError on any failure; nothing is persisted on
-    failure paths that raise before ``save_session``.
+    failure paths that raise before ``save_session`` (the guard write is the
+    one exception — it is idempotent and wanted on any pooled machine).
     """
     client = PoolClient(url, anon_key)
-    session = client.sign_in_password(email, password)
+    session = client.verify_email_code(email, code)
     version = client.schema_version(session)
     if version != POOL_SCHEMA_VERSION:
         raise PoolError(f"pool schema is v{version}; this cswap speaks v{POOL_SCHEMA_VERSION}")
     member = client.member(session)
     client.register_machine(session, machine_id(switcher.backup_dir), platform.node(), __version__)
+    guard_applied = tuple(enforce_remote_control_guard())
 
     save_session(switcher.backup_dir, session)
     set_setting(switcher.backup_dir, "pool.url", url)
@@ -89,7 +100,21 @@ def login_pool(switcher: ClaudeAccountSwitcher, url: str, anon_key: str, email: 
     sync = PoolSync(switcher, client, session, machine_id=machine_id(switcher.backup_dir))
     report = sync.run_pass()
     suggest_strikes = load_settings(switcher.backup_dir).dead_token_strikes < 2
-    return LoginResult(email=email, role=member["role"], report=report, suggest_strikes=suggest_strikes)
+    return LoginResult(email=session.email or email.strip().lower(), role=member["role"], report=report,
+                       suggest_strikes=suggest_strikes, guard_applied=guard_applied)
+
+
+def guard_warning_lines(indent: str = "  ") -> list[str]:
+    """The warning `pool status` and `sync` print when the Remote Control
+    guard has been removed from this machine's Claude settings; empty when
+    the guard is in place."""
+    gaps = remote_control_guard_gaps()
+    if not gaps:
+        return []
+    return [indent + yellowed(
+        "Remote Control is not disabled in Claude Code's settings.json (" + ", ".join(gaps) + "); "
+        "a session started on a borrowed login would be visible to its owner. Run: cswap pool login"
+    )]
 
 
 def logout_pool(switcher: ClaudeAccountSwitcher, *, keep: bool) -> LogoutResult:
@@ -141,6 +166,7 @@ def status_lines(switcher: ClaudeAccountSwitcher) -> list[str]:
     last = state.get("lastPassAt")
     lines.append("  machine " + machine_id(switcher.backup_dir) + "  last sync "
                   + (f"{int(time.time() - last)}s ago" if isinstance(last, (int, float)) else "never"))
+    lines.extend(guard_warning_lines())
     for row in rows:
         tag = "owned" if row["owned"] else "borrowed"
         lines.append(f"  {row['number']:>2}  {row['email']}  {dimmed(tag)}")
@@ -172,10 +198,10 @@ def pool_command(argv: list[str]) -> None:
     )
     sub = parser.add_subparsers(dest="verb", required=True)
 
-    p_login = sub.add_parser("login", help="Sign in to the pool on this machine")
+    p_login = sub.add_parser("login", help="Sign in to the pool on this machine with a code sent to your email")
     p_login.add_argument("--url", help="Supabase project URL (saved to settings)")
     p_login.add_argument("--anon-key", help="Supabase anon key (saved to settings)")
-    p_login.add_argument("--email")
+    p_login.add_argument("--email", help="Your work email; a one-time code is sent to it")
 
     p_logout = sub.add_parser("logout", help="Sign out; removes borrowed accounts unless --keep")
     p_logout.add_argument("--keep", action="store_true", help="Keep borrowed slots on this machine")
@@ -213,12 +239,20 @@ def _login(switcher: ClaudeAccountSwitcher, args) -> None:
     url = (args.url or settings.url or input("Pool URL (https://<ref>.supabase.co): ")).strip().rstrip("/")
     anon_key = (args.anon_key or settings.anon_key or input("Anon key: ")).strip()
     email = (args.email or input("Email: ")).strip()
-    password = getpass.getpass("Password: ")
-    if not (url and anon_key and email and password):
-        raise PoolError("url, anon key, email and password are all required")
+    if not (url and anon_key and email):
+        raise PoolError("url, anon key and email are all required")
 
-    result = login_pool(switcher, url, anon_key, email, password)
+    request_login_code(url, anon_key, email)
+    print(f"Sent a sign-in code to {email.lower()}; it is valid for a few minutes.")
+    code = "".join(input("Code from your email: ").split())
+    if not code:
+        raise PoolError("no code entered")
+
+    result = login_pool(switcher, url, anon_key, email, code)
     print(f"{accent('Logged in')} to the pool as {result.email} ({result.role})")
+    if result.guard_applied:
+        print(dimmed("Remote Control disabled in Claude Code's settings.json (" + ", ".join(result.guard_applied)
+                     + ") so sessions on borrowed logins never surface in a teammate's claude.ai"))
     _print_report(result.report)
     if result.suggest_strikes:
         print(dimmed("Tip: cswap config set autoswitch.deadTokenStrikes 2 tolerates the pool's sync lag"))
@@ -258,6 +292,7 @@ def _status(switcher: ClaudeAccountSwitcher, args) -> None:
             "lastPassAt": state.get("lastPassAt"),
             "accounts": rows,
             "attention": state.get("attention", []),
+            "remoteControlGuardGaps": [] if session is None else remote_control_guard_gaps(),
         }, indent=2))
         return
     for line in status_lines(switcher):
@@ -363,6 +398,10 @@ def sync_command(argv: list[str]) -> None:
         report = sync.run_pass()
         _print_report(report)
         return report
+
+    if pool_logged_in(switcher):
+        for line in guard_warning_lines(indent=""):
+            print(line)
 
     if args.once:
         report = one_pass()

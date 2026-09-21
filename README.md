@@ -371,10 +371,12 @@ If an imported account is the one you're currently logged in as, activate the im
 
 A pool is a Supabase project that holds each member's Claude logins so a
 login rotated on any machine reaches every other machine before its copy
-dies. Members are created by the pool admin (see `supabase/README.md`).
+dies. The admin sets it up once (see `supabase/README.md`); after that,
+teammates sign themselves in with their work email and a one-time code
+from their inbox. No passwords, no invites.
 
 ```bash
-cswap pool login                     # once per machine: pool URL, anon key, email, password
+cswap pool login                     # once per machine: pool URL, anon key, email, then the emailed code
 cswap add --pool                     # publish the login you are signed in with
 cswap pool share 2 --swap-limit 80 --hard-limit 50   # what borrowers may use of it
 cswap pool unshare 2                 # withdraw it
@@ -403,6 +405,13 @@ loser recovers on its next pass. Set `autoswitch.deadTokenStrikes` to 2 or
 more on pooled machines so that lag never reads as a dead token. Limits are
 honoured by each teammate's cswap, not enforced by the server: anyone in the
 pool can read a shared login's token bytes.
+
+Remote Control is switched off on pooled machines: `cswap pool login` writes
+`disableRemoteControl: true` (and `remoteControlAtStartup: false`) into
+`~/.claude/settings.json`, which cswap never swaps between accounts. A Claude
+Code session started on a borrowed login would otherwise show up in, and be
+drivable from, the owner's claude.ai. `cswap pool status` and `cswap sync`
+warn if the keys are removed; `cswap pool logout` leaves them in place.
 
 ### JSON output for scripting
 

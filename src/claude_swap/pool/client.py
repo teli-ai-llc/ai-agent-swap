@@ -120,27 +120,67 @@ class PoolClient:
         self._clock = clock
 
     # -- auth -----------------------------------------------------------------
-    def _auth_post(self, grant: str, payload: dict) -> dict:
+    def _auth_call(self, path: str, payload: dict) -> tuple[int, dict]:
         status, body = self._call(
-            "POST", f"{self.url}/auth/v1/token?grant_type={grant}",
+            "POST", f"{self.url}/auth/v1/{path}",
             {"apikey": self.anon_key, "Content-Type": "application/json",
              "User-Agent": _USER_AGENT},
             json.dumps(payload).encode(),
         )
-        data = self._decode(body)
+        return status, self._decode(body)
+
+    @staticmethod
+    def _auth_detail(data: dict) -> str:
+        # GoTrue has used several envelopes over time: OAuth-style
+        # ``error``/``error_description``, ``message``, and the current
+        # ``msg`` + ``error_code`` pair ("Email not confirmed").
+        return (
+            data.get("error_description") or data.get("msg")
+            or data.get("message") or data.get("error_code")
+            or data.get("error") or "refused"
+        )
+
+    def _auth_post(self, grant: str, payload: dict) -> dict:
+        status, data = self._auth_call(f"token?grant_type={grant}", payload)
         if status in (400, 401, 403):
-            # GoTrue has used several envelopes over time: OAuth-style
-            # ``error``/``error_description``, ``message``, and the current
-            # ``msg`` + ``error_code`` pair ("Email not confirmed").
-            detail = (
-                data.get("error_description") or data.get("msg")
-                or data.get("message") or data.get("error_code")
-                or data.get("error") or "refused"
-            )
-            raise PoolAuthError(f"pool sign-in refused: {detail}")
+            raise PoolAuthError(f"pool sign-in refused: {self._auth_detail(data)}")
         if status >= 300:
             raise PoolError(f"pool auth endpoint answered HTTP {status}")
         return data
+
+    def request_email_code(self, email: str) -> None:
+        """Ask the pool to email ``email`` a one-time sign-in code. A first-time
+        address is signed up on the spot when the pool allows its domain
+        (``pool_signup_guard``); nothing is returned, the code arrives by mail."""
+        email = email.strip().lower()
+        status, data = self._auth_call("otp", {"email": email, "create_user": True})
+        if status < 300:
+            return
+        detail = self._auth_detail(data)
+        if status == 429:
+            raise PoolError(f"the pool's mailer is rate limited ({detail}); wait a minute and try again")
+        if status == 500 and "saving new user" in detail:
+            # A raise inside the auth.users insert trigger surfaces as this
+            # generic message; the guard is the only trigger we install.
+            raise PoolAuthError(
+                f"the pool refused to create a login for {email}: its allowed "
+                "email domains do not include yours (ask the pool admin)"
+            )
+        if status in (400, 401, 403, 422):
+            raise PoolAuthError(f"pool refused to send a code: {detail}")
+        raise PoolError(f"pool auth endpoint answered HTTP {status}")
+
+    def verify_email_code(self, email: str, code: str) -> PoolSession:
+        """Exchange the emailed code for a session. Codes are single-use; a
+        wrong guess does not burn the pending one."""
+        email = email.strip().lower()
+        code = "".join(code.split())
+        status, data = self._auth_call("verify", {"type": "email", "email": email, "token": code})
+        if status in (400, 401, 403, 422):
+            raise PoolAuthError(f"pool sign-in refused: {self._auth_detail(data)}")
+        if status >= 300:
+            raise PoolError(f"pool auth endpoint answered HTTP {status}")
+        return self._session_from(data)
 
     def _session_from(self, data: dict) -> PoolSession:
         try:

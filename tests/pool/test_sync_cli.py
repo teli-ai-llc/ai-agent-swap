@@ -40,6 +40,17 @@ class TestOnce:
         assert "pulled 1 account" in capsys.readouterr().out
         assert "1" in logged_in._get_sequence_data()["accounts"]
 
+    def test_once_warns_when_the_remote_control_guard_is_missing(self, logged_in, capsys):
+        from claude_swap.pool.guard import enforce_remote_control_guard, guard_settings_path
+
+        with pytest.raises(SystemExit):
+            _run(["sync", "--once"])
+        assert "Remote Control is not disabled" in capsys.readouterr().out
+        enforce_remote_control_guard(guard_settings_path())
+        with pytest.raises(SystemExit):
+            _run(["sync", "--once"])
+        assert "Remote Control" not in capsys.readouterr().out
+
     def test_once_when_unreachable_exits_1(self, logged_in, fake_pool, capsys):
         fake_pool.offline = True
         with pytest.raises(SystemExit) as info:
