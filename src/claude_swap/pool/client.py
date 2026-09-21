@@ -148,17 +148,16 @@ class PoolClient:
             raise PoolError(f"pool auth endpoint answered HTTP {status}")
         return data
 
-    def request_email_code(self, email: str) -> None:
-        """Ask the pool to email ``email`` a one-time sign-in code. A first-time
-        address is signed up on the spot when the pool allows its domain
-        (``pool_signup_guard``); nothing is returned, the code arrives by mail."""
+    def sign_up_password(self, email: str, password: str) -> PoolSession:
+        """First-time member: create the auth user with the shared pool code and
+        return its session. Needs the project's "Confirm email" setting off,
+        else GoTrue answers with a user but no session (and tries to send
+        mail). ``pool_signup_guard`` decides which domains may sign up."""
         email = email.strip().lower()
-        status, data = self._auth_call("otp", {"email": email, "create_user": True})
-        if status < 300:
-            return
+        status, data = self._auth_call("signup", {"email": email, "password": password})
         detail = self._auth_detail(data)
         if status == 429:
-            raise PoolError(f"the pool's mailer is rate limited ({detail}); wait a minute and try again")
+            raise PoolError(f"pool sign-up is rate limited ({detail}); try again in a few minutes")
         if status == 500 and (
             str(data.get("code")) == "23514" or "sign-ups from" in detail or "saving new user" in detail
         ):
@@ -171,19 +170,20 @@ class PoolClient:
                 "email domains do not include yours (ask the pool admin)"
             )
         if status in (400, 401, 403, 422):
-            raise PoolAuthError(f"pool refused to send a code: {detail}")
-        raise PoolError(f"pool auth endpoint answered HTTP {status}")
-
-    def verify_email_code(self, email: str, code: str) -> PoolSession:
-        """Exchange the emailed code for a session. Codes are single-use; a
-        wrong guess does not burn the pending one."""
-        email = email.strip().lower()
-        code = "".join(code.split())
-        status, data = self._auth_call("verify", {"type": "email", "email": email, "token": code})
-        if status in (400, 401, 403, 422):
-            raise PoolAuthError(f"pool sign-in refused: {self._auth_detail(data)}")
+            if data.get("error_code") == "user_already_exists" or "already registered" in detail.lower():
+                raise PoolAuthError(
+                    f"{email} is already a pool member but the code does not match; "
+                    "ask the pool admin to reset it"
+                )
+            raise PoolAuthError(f"pool sign-up refused: {detail}")
         if status >= 300:
             raise PoolError(f"pool auth endpoint answered HTTP {status}")
+        if "access_token" not in data:
+            raise PoolError(
+                "the pool created your login but withheld the session: the project still "
+                "requires email confirmation. Ask the pool admin to turn off "
+                "\"Confirm email\" (Authentication -> Sign In / Providers -> Email)"
+            )
         return self._session_from(data)
 
     def _session_from(self, data: dict) -> PoolSession:

@@ -250,20 +250,20 @@ class RuleModal(ModalScreen["RuleForm | None"]):
 
 @dataclass(frozen=True)
 class PoolLoginForm:
-    """What the pool login modal collects: where the pool is and who is
-    logging in. The one-time code comes afterwards (``PoolCodeModal``),
-    because requesting it is a network call the app runs off the UI thread."""
+    """What the pool login modal collects: where the pool is, who is logging
+    in, and the shared pool code (a first-time email is signed up with it)."""
 
     url: str
     anon_key: str
     email: str
+    code: str
 
 
 class PoolLoginModal(ModalScreen["PoolLoginForm | None"]):
-    """Collects the pool URL/anon key and a member's email.
+    """Collects the pool URL/anon key, a member's email and the pool code.
 
-    The anon key uses ``password=True`` so it is not shoulder-surfable. Same
-    ←/→ button navigation as the other forms.
+    The anon key and the code use ``password=True`` so neither is
+    shoulder-surfable. Same ←/→ button navigation as the other forms.
     """
 
     BINDINGS = [
@@ -281,7 +281,8 @@ class PoolLoginModal(ModalScreen["PoolLoginForm | None"]):
         with Vertical(classes="modal-box"):
             yield Label("Log in to the pool", classes="modal-title")
             yield Static(
-                "Sign in with your work email; a one-time code is sent to it.",
+                "Sign in with your work email and the team's pool code. "
+                "A first login creates your membership.",
                 classes="modal-body",
             )
             yield Input(value=self._url, placeholder="pool URL", id="url")
@@ -292,12 +293,13 @@ class PoolLoginModal(ModalScreen["PoolLoginForm | None"]):
                 id="anon-key",
             )
             yield Input(placeholder="email", id="email")
+            yield Input(password=True, placeholder="pool code", id="code")
             yield Static("", id="form-error", classes="form-error")
             with Horizontal(classes="modal-buttons"):
-                yield Button("Send code", id="login")
+                yield Button("Log in", id="login")
                 yield Button("Cancel", id="cancel")
             yield Static(
-                "enter send code  ·  tab next field  ·  esc cancel",
+                "enter log in  ·  tab next field  ·  esc cancel",
                 classes="modal-hint",
             )
 
@@ -314,67 +316,13 @@ class PoolLoginModal(ModalScreen["PoolLoginForm | None"]):
         url = self.query_one("#url", Input).value.strip().rstrip("/")
         anon_key = self.query_one("#anon-key", Input).value.strip()
         email = self.query_one("#email", Input).value.strip().lower()
-        if not (url and anon_key and email):
+        code = self.query_one("#code", Input).value
+        if not (url and anon_key and email) or not code.strip():
             self.query_one("#form-error", Static).update(
-                "URL, anon key, and email are all required."
+                "URL, anon key, email, and pool code are all required."
             )
             return
-        self.dismiss(PoolLoginForm(url=url, anon_key=anon_key, email=email))
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
-
-
-class PoolCodeModal(ModalScreen["str | None"]):
-    """Second step of a pool login: the one-time code that was just emailed.
-
-    Dismisses with the code with all whitespace removed (people paste
-    "123 456"), or ``None`` on cancel.
-    """
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel", show=False),
-        Binding("left", "app.focus_previous", show=False),
-        Binding("right", "app.focus_next", show=False),
-    ]
-
-    def __init__(self, email: str) -> None:
-        super().__init__()
-        self._email = email
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="modal-box"):
-            yield Label("Enter your sign-in code", classes="modal-title")
-            yield Static(
-                f"A one-time code was sent to {self._email}. "
-                "It is valid for a few minutes.",
-                classes="modal-body",
-            )
-            yield Input(placeholder="code from your email", id="code")
-            yield Static("", id="form-error", classes="form-error")
-            with Horizontal(classes="modal-buttons"):
-                yield Button("Log in", id="login")
-                yield Button("Cancel", id="cancel")
-            yield Static(
-                "enter log in  ·  esc cancel",
-                classes="modal-hint",
-            )
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
-            self.dismiss(None)
-            return
-        self._submit()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._submit()
-
-    def _submit(self) -> None:
-        code = "".join(self.query_one("#code", Input).value.split())
-        if not code:
-            self.query_one("#form-error", Static).update("Enter the code from your email.")
-            return
-        self.dismiss(code)
+        self.dismiss(PoolLoginForm(url=url, anon_key=anon_key, email=email, code=code))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

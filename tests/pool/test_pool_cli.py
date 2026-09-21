@@ -32,9 +32,10 @@ def _run(argv: list[str]) -> None:
 
 
 def _answer_code(wired, monkeypatch, email: str = "borrower@x.io", code: str | None = None) -> None:
-    """Make the code prompt answer with the code the fake pool just sent
-    (or a fixed wrong one)."""
-    monkeypatch.setattr("builtins.input", lambda prompt="": code if code is not None else wired.codes[email])
+    """Make the hidden "Pool code" prompt answer with the member's own
+    password (the fake's users each have one) or a fixed value."""
+    pw = code if code is not None else next(u.password for u in wired.users.values() if u.email == email)
+    monkeypatch.setattr("getpass.getpass", lambda prompt="": pw)
 
 
 def _guard_file():
@@ -51,10 +52,9 @@ class TestLogin:
         _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key,
               "--email", "borrower@x.io"])
         out = capsys.readouterr().out
-        assert "Sent a sign-in code to borrower@x.io" in out
         assert "Logged in to the pool as borrower@x.io" in out
         assert "pulled 1 account" in out
-        assert wired.sent_codes == ["borrower@x.io"]
+        assert wired.signups == []          # an existing member: plain sign-in
         session = load_session(s.backup_dir)
         assert session.email == "borrower@x.io"
         settings = load_pool_settings(s.backup_dir)
@@ -62,36 +62,48 @@ class TestLogin:
         assert wired.machines  # registered
         assert s.slot_pool_info("1")[1] is False
 
-    def test_wrong_code_exits_1_and_persists_nothing(self, wired, owner, monkeypatch, capsys):
+    def test_wrong_code_for_an_existing_member_exits_1_and_persists_nothing(self, wired, owner, monkeypatch, capsys):
         s = _switcher()
-        _answer_code(wired, monkeypatch, "owner@x.io", code="000000")
+        _answer_code(wired, monkeypatch, "owner@x.io", code="not-the-code")
         with pytest.raises(SystemExit) as info:
             _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key,
                   "--email", "owner@x.io"])
         assert info.value.code == 1
-        assert "expired or is invalid" in capsys.readouterr().err
+        assert "already a pool member but the code does not match" in capsys.readouterr().err
+        assert wired.signups == []
         assert load_session(s.backup_dir) is None
         assert load_pool_settings(s.backup_dir).url is None
 
-    def test_email_outside_the_pool_domains_exits_1_before_any_code(self, wired, monkeypatch, capsys):
+    def test_email_outside_the_pool_domains_exits_1(self, wired, monkeypatch, capsys):
         wired.signup_domains = ["x.io"]
-        _answer_code(wired, monkeypatch, code="unreached")
+        _answer_code(wired, monkeypatch, code="team-code-1")
         with pytest.raises(SystemExit) as info:
             _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key,
                   "--email", "someone@else.example"])
         assert info.value.code == 1
         assert "email domains" in capsys.readouterr().err
-        assert wired.sent_codes == []
+        assert wired.signups == []
 
-    def test_first_login_of_a_new_teammate_needs_no_admin_step(self, wired, monkeypatch, capsys):
-        """With signup domains configured, an unknown address in one of them is
-        signed up and gets its member row on the spot (the trigger's job; the
-        fake mirrors it)."""
+    def test_first_login_of_a_new_teammate_signs_them_up_with_the_pool_code(self, wired, monkeypatch, capsys):
+        """An unknown address in an allowed domain is signed up with the code
+        and gets its member row on the spot (the trigger's job; the fake
+        mirrors it). No admin step, no email."""
         wired.signup_domains = ["x.io"]
-        _answer_code(wired, monkeypatch, "new@x.io")
+        _answer_code(wired, monkeypatch, code="team-code-1")
         _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key,
               "--email", "New@x.io"])
-        assert "Logged in to the pool as new@x.io (member)" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "Welcome to the pool" in out
+        assert "Logged in to the pool as new@x.io (member)" in out
+        assert wired.signups == ["new@x.io"]
+
+    def test_a_blank_code_is_refused_before_any_request(self, wired, monkeypatch, capsys):
+        _answer_code(wired, monkeypatch, code="   ")
+        with pytest.raises(SystemExit):
+            _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key,
+                  "--email", "owner@x.io"])
+        assert "pool code" in capsys.readouterr().err.lower()
+        assert wired.calls == []
 
     def test_login_enforces_the_remote_control_guard(self, wired, owner, borrower, monkeypatch, capsys):
         import json as _json

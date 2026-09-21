@@ -45,14 +45,14 @@ class FakePool:
     calls: list[tuple[str, str]] = field(default_factory=list)
     clock: object = time.time
     offline: bool = False
-    #: Email-code sign-in (``/auth/v1/otp`` + ``/auth/v1/verify``). A domain
+    #: Self sign-up with the shared pool code (``/auth/v1/signup``). A domain
     #: list mirrors the ``pool_signup_guard`` trigger: when non-empty, a
     #: first-time email outside it fails the way GoTrue reports a trigger
     #: exception; when empty, anyone is created (signups open, no guard).
     signup_domains: list[str] = field(default_factory=list)
-    codes: dict[str, str] = field(default_factory=dict)          # email -> pending code
-    sent_codes: list[str] = field(default_factory=list)          # every email a code went to
-    mailer_limited: bool = False                                 # 429 on /otp
+    signups: list[str] = field(default_factory=list)             # every email that signed up
+    confirm_email: bool = False      # dashboard "Confirm email" on: signup answers without a session
+    signups_disabled: bool = False   # dashboard "Allow new users to sign up" off
 
     # -- setup helpers ------------------------------------------------------
     def add_member(self, email: str, password: str = "pw", *, role: str = "member",
@@ -89,10 +89,8 @@ class FakePool:
             return 401, b'{"message":"bad apikey"}'
         if parts.path == "/auth/v1/token":
             return self._auth(params.get("grant_type"), payload)
-        if parts.path == "/auth/v1/otp":
-            return self._otp(payload or {})
-        if parts.path == "/auth/v1/verify":
-            return self._verify(payload or {})
+        if parts.path == "/auth/v1/signup":
+            return self._signup(payload or {})
         if parts.path.startswith("/rest/v1/"):
             auth = headers.get("Authorization", "")
             jwt = auth.removeprefix("Bearer ").strip()
@@ -115,39 +113,31 @@ class FakePool:
             return 200, self._token_response(self.users[user_id])
         return 400, b'{"error":"unsupported_grant_type"}'
 
-    def _otp(self, payload: dict):
+    def _signup(self, payload: dict):
         email = (payload.get("email") or "").strip().lower()
+        password = payload.get("password") or ""
         if not email or "@" not in email:
             return 400, b'{"code":400,"error_code":"validation_failed","msg":"Unable to validate email address: invalid format"}'
-        if self.mailer_limited:
-            return 429, b'{"code":429,"error_code":"over_email_send_rate_limit","msg":"email rate limit exceeded"}'
-        user = next((u for u in self.users.values() if u.email == email), None)
-        if user is None:
-            if not payload.get("create_user", True):
-                return 422, b'{"code":422,"error_code":"otp_disabled","msg":"Signups not allowed for otp"}'
-            domain = email.rsplit("@", 1)[1]
-            if self.signup_domains and domain not in self.signup_domains:
-                # What hosted GoTrue answers when pool_signup_guard raises
-                # (captured from the real project, 2026-09-21).
-                return 500, json.dumps({
-                    "code": "23514",
-                    "message": f"pool: sign-ups from @{domain} are not allowed (pool_meta.signup_domains)",
-                }).encode()
-            self.add_member(email, password="")
-        code = f"{len(self.sent_codes) + 1:06d}"
-        self.codes[email] = code
-        self.sent_codes.append(email)
-        return 200, b"{}"
-
-    def _verify(self, payload: dict):
-        email = (payload.get("email") or "").strip().lower()
-        if payload.get("type") != "email":
-            return 400, b'{"code":400,"error_code":"validation_failed","msg":"Verify requires a verification type"}'
-        if email and self.codes.get(email) == payload.get("token"):
-            del self.codes[email]
-            user = next(u for u in self.users.values() if u.email == email)
-            return 200, self._token_response(user)
-        return 403, b'{"code":403,"error_code":"otp_expired","msg":"Token has expired or is invalid"}'
+        if len(password) < 6:
+            return 422, b'{"code":422,"error_code":"weak_password","msg":"Password should be at least 6 characters."}'
+        if self.signups_disabled:
+            return 422, b'{"code":422,"error_code":"signup_disabled","msg":"Signups not allowed for this instance"}'
+        if any(u.email == email for u in self.users.values()):
+            return 422, b'{"code":422,"error_code":"user_already_exists","msg":"User already registered"}'
+        domain = email.rsplit("@", 1)[1]
+        if self.signup_domains and domain not in self.signup_domains:
+            # What hosted GoTrue answers when pool_signup_guard raises
+            # (captured from the real project, 2026-09-21).
+            return 500, json.dumps({
+                "code": "23514",
+                "message": f"pool: sign-ups from @{domain} are not allowed (pool_meta.signup_domains)",
+            }).encode()
+        user = self.add_member(email, password=password)
+        self.signups.append(email)
+        if self.confirm_email:
+            # GoTrue: the user object, no tokens, until the email is confirmed
+            return 200, json.dumps({"id": user.user_id, "email": user.email, "confirmation_sent_at": _now_iso()}).encode()
+        return 200, self._token_response(user)
 
     def _token_response(self, user: FakeUser) -> bytes:
         jwt = f"jwt-{uuid.uuid4()}"

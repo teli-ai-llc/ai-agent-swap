@@ -69,7 +69,7 @@ how much of it teammates may use.
 
 - Claude Code is installed and you are signed in with **your own** account.
 - `uv` is installed. If not: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-- You have your `@teli.ai` email inbox open. Login codes go there.
+- You have the pool URL, the anon key and the pool code from Austin.
 
 ### 2. Install
 
@@ -85,7 +85,8 @@ cswap --version
 
 ### 3. Log in to the pool
 
-Once per machine. No password, no invite: you get a one-time code by email.
+Once per machine. No password of your own, no invite, no email: your work
+email plus the team's pool code.
 
 ```bash
 cswap pool login \
@@ -93,17 +94,18 @@ cswap pool login \
   --anon-key <ANON_KEY>
 ```
 
-Get `<POOL_URL>` and `<ANON_KEY>` from the pinned message in the team Slack channel, or
-ask Austin. They are not in this README because this repository is public.
+Get `<POOL_URL>`, `<ANON_KEY>` and the pool code from the pinned message in the
+team Slack channel, or ask Austin. They are not in this README because this
+repository is public.
 
 1. Type your `@teli.ai` email.
-2. Check your inbox for an email from Supabase Auth with your sign-in code, and type the code.
-   It can land in spam the first time.
+2. Type the pool code at the hidden prompt.
 3. You should see `Logged in to the pool as you@teli.ai (member)` and a line
-   like `pulled 3 account(s)`. Those are teammates' shared logins.
+   like `pulled 3 account(s)`. Those are teammates' shared logins. A first
+   login also says `Welcome to the pool`: your membership was created just now.
 
 The URL and key are saved, so later logins are just `cswap pool login`.
-Only `@teli.ai` addresses are accepted. Your account is created on first login.
+Only `@teli.ai` addresses are accepted.
 
 **This also turns off Claude Code's Remote Control on your machine.** The login
 writes `disableRemoteControl: true` into `~/.claude/settings.json`. Without it,
@@ -241,11 +243,11 @@ cswap add
 
 The fresh login flows to everyone within about 30 seconds.
 
-**"the pool's mailer is rate limited".** The pool sends only a few emails per
-hour. Wait a few minutes and run `cswap pool login` again.
+**"is already a pool member but the code does not match".** The pool code
+was mistyped, or it changed. Ask Austin for the current one.
 
-**"Token has expired or is invalid".** The code was mistyped or is more than a
-few minutes old. Run `cswap pool login` again for a new one.
+**"the project still requires email confirmation".** A Supabase setting is
+wrong on the admin side. Tell Austin: Confirm email must be off.
 
 **"its allowed email domains do not include yours".** Use your `@teli.ai`
 address.
@@ -598,12 +600,12 @@ If an imported account is the one you're currently logged in as, activate the im
 A pool is a Supabase project that holds each member's Claude logins so a
 login rotated on any machine reaches every other machine before its copy
 dies. The admin sets it up once (see [`supabase/README.md`](supabase/README.md));
-after that, teammates sign themselves in with their work email and a one-time
-code. No passwords, no invites. The full walkthrough is the
+after that, teammates sign themselves in with their work email and the team's
+pool code. No invites, no emails. The full walkthrough is the
 [Team pool guide](#team-pool-guide) below.
 
 ```bash
-cswap pool login                     # once per machine: pool URL, anon key, email, then the emailed code
+cswap pool login                     # once per machine: pool URL, anon key, email, pool code
 cswap add --pool                     # publish the login you are signed in with
 cswap pool share 2 --swap-limit 80 --hard-limit 50   # what borrowers may use of it
 cswap pool unshare 2                 # withdraw it

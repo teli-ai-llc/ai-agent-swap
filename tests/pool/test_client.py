@@ -39,55 +39,42 @@ class TestAuth:
         with pytest.raises(PoolAuthError):
             _client(fake_pool).sign_in_password("owner@x.io", "nope")
 
-    def test_email_code_round_trip(self, fake_pool, owner):
-        client = _client(fake_pool)
-        client.request_email_code("owner@x.io")
-        assert fake_pool.sent_codes == ["owner@x.io"]
-        s = client.verify_email_code("owner@x.io", fake_pool.codes["owner@x.io"])
-        assert s.user_id == owner.user_id and s.email == "owner@x.io"
-        assert s.expires_at > 0
-
-    def test_email_code_creates_a_first_time_member(self, fake_pool):
+    def test_sign_up_with_the_pool_code_creates_a_member_and_signs_in(self, fake_pool):
         fake_pool.signup_domains = ["x.io"]
         client = _client(fake_pool)
-        client.request_email_code("New.Person@x.io")
-        s = client.verify_email_code("New.Person@x.io", fake_pool.codes["new.person@x.io"])
-        assert s.email == "new.person@x.io"
+        s = client.sign_up_password(" New.Person@x.io ", "team-code-1")
+        assert s.email == "new.person@x.io" and s.expires_at > 0
+        assert fake_pool.signups == ["new.person@x.io"]
         assert client.member(s)["role"] == "member"
+        # and from then on it is a plain sign-in
+        again = client.sign_in_password("new.person@x.io", "team-code-1")
+        assert again.user_id == s.user_id
 
-    def test_email_code_outside_allowed_domains_is_explained(self, fake_pool):
+    def test_sign_up_outside_allowed_domains_is_explained(self, fake_pool):
         fake_pool.signup_domains = ["x.io"]
         with pytest.raises(PoolAuthError, match="email domain"):
-            _client(fake_pool).request_email_code("stranger@evil.example")
-        assert fake_pool.sent_codes == []
+            _client(fake_pool).sign_up_password("stranger@evil.example", "team-code-1")
+        assert fake_pool.signups == []
 
-    def test_email_code_wrong_or_stale(self, fake_pool, owner):
-        client = _client(fake_pool)
-        client.request_email_code("owner@x.io")
-        with pytest.raises(PoolAuthError, match="expired or is invalid"):
-            client.verify_email_code("owner@x.io", "000000")
-        # the right code still works after a wrong guess
-        client.verify_email_code("owner@x.io", fake_pool.codes["owner@x.io"])
-        # ... but only once
-        with pytest.raises(PoolAuthError):
-            client.verify_email_code("owner@x.io", "000001")
+    def test_sign_up_for_an_existing_member_names_the_code_mismatch(self, fake_pool, owner):
+        with pytest.raises(PoolAuthError, match="already a pool member"):
+            _client(fake_pool).sign_up_password("owner@x.io", "not-their-code")
 
-    def test_email_code_is_whitespace_tolerant(self, fake_pool, owner):
-        client = _client(fake_pool)
-        client.request_email_code(" owner@x.io ")
-        code = fake_pool.codes["owner@x.io"]
-        client.verify_email_code("owner@x.io", f" {code[:3]} {code[3:]}\n")
-
-    def test_mailer_rate_limit_is_a_pool_error_with_advice(self, fake_pool, owner):
-        fake_pool.mailer_limited = True
-        with pytest.raises(PoolError, match="rate limit") as info:
-            _client(fake_pool).request_email_code("owner@x.io")
+    def test_sign_up_while_confirm_email_is_on_tells_the_admin_what_to_flip(self, fake_pool):
+        fake_pool.confirm_email = True
+        with pytest.raises(PoolError, match="Confirm email") as info:
+            _client(fake_pool).sign_up_password("new@x.io", "team-code-1")
         assert not isinstance(info.value, PoolAuthError)
 
-    def test_email_code_offline_is_pool_error(self, fake_pool, owner):
+    def test_sign_up_when_signups_are_disabled(self, fake_pool):
+        fake_pool.signups_disabled = True
+        with pytest.raises(PoolAuthError, match="Signups not allowed"):
+            _client(fake_pool).sign_up_password("new@x.io", "team-code-1")
+
+    def test_sign_up_offline_is_pool_error(self, fake_pool):
         fake_pool.offline = True
         with pytest.raises(PoolError, match="unreachable"):
-            _client(fake_pool).request_email_code("owner@x.io")
+            _client(fake_pool).sign_up_password("new@x.io", "team-code-1")
 
     def test_ensure_fresh_refreshes_near_expiry(self, fake_pool, owner):
         now = [1_000_000.0]
@@ -221,15 +208,15 @@ def test_older_gotrue_flattens_the_signup_guard_refusal():
         return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Database error saving new user"}'
     client = PoolClient("https://x.supabase.co", "anon", transport=transport)
     with pytest.raises(PoolAuthError, match="email domains"):
-        client.request_email_code("a@elsewhere.example")
+        client.sign_up_password("a@elsewhere.example", "team-code-1")
 
 
-def test_an_unrelated_500_on_code_request_is_not_blamed_on_the_domain():
+def test_an_unrelated_500_on_sign_up_is_not_blamed_on_the_domain():
     def transport(method, url, headers, body):
-        return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Error sending magic link email"}'
+        return 500, b'{"code":500,"error_code":"unexpected_failure","msg":"Error sending confirmation email"}'
     client = PoolClient("https://x.supabase.co", "anon", transport=transport)
     with pytest.raises(PoolError) as info:
-        client.request_email_code("a@x.io")
+        client.sign_up_password("a@x.io", "team-code-1")
     assert not isinstance(info.value, PoolAuthError)
 
 

@@ -31,7 +31,6 @@ from claude_swap.tui.modals import (
     AddTokenModal,
     ConfirmModal,
     OutputModal,
-    PoolCodeModal,
     PoolLoginForm,
     PoolLoginModal,
     PoolShareForm,
@@ -282,38 +281,30 @@ class CswapApp(App):
 
     # -- mutating actions (single-flight, captured, off-thread) ---------------
 
-    def _start_action(
-        self, label: str, fn, *, show_output: bool = False, on_success=None
-    ) -> None:
-        """Run ``fn`` on a worker thread with its output captured. A failure
-        always lands in an output modal; on success ``on_success()`` (UI
-        thread) takes over when given, else the output is shown or toasted."""
+    def _start_action(self, label: str, fn, *, show_output: bool = False) -> None:
         if self.busy:
             self.notify("Another action is still running", severity="warning")
             return
         self.busy = True
         self.run_worker(
-            partial(self._action_blocking, label, fn, show_output, on_success),
+            partial(self._action_blocking, label, fn, show_output),
             thread=True,
             group="action",
             exit_on_error=False,
             name=label,
         )
 
-    def _action_blocking(self, label: str, fn, show_output: bool, on_success) -> None:
+    def _action_blocking(self, label: str, fn, show_output: bool) -> None:
         result = run_action(fn)
-        self.call_from_thread(self._action_done, label, result, show_output, on_success)
+        self.call_from_thread(self._action_done, label, result, show_output)
 
     def _action_done(
-        self, label: str, result: ActionResult, show_output: bool, on_success=None
+        self, label: str, result: ActionResult, show_output: bool
     ) -> None:
         self.busy = False
         self.request_refresh()
         if not result.ok:
             self.push_screen(OutputModal(f"{label} — failed", result.output))
-            return
-        if on_success is not None:
-            on_success()
             return
         payload = result.payload or {}
         if "switched" in payload:
@@ -424,35 +415,17 @@ class CswapApp(App):
         )
 
     def _on_pool_login_form(self, form: PoolLoginForm | None) -> None:
-        """Step one: have the pool email a code (network, so on a worker);
-        then ask for it."""
         if form is None:
-            return
-
-        def do_request() -> None:
-            from claude_swap.pool.cli import request_login_code
-
-            request_login_code(form.url, form.anon_key, form.email)
-
-        self._start_action(
-            "Pool login",
-            do_request,
-            on_success=lambda: self.push_screen(
-                PoolCodeModal(form.email), partial(self._on_pool_code, form)
-            ),
-        )
-
-    def _on_pool_code(self, form: PoolLoginForm, code: str | None) -> None:
-        """Step two: exchange the code for a session and run the first pass."""
-        if code is None:
             return
 
         def do_login() -> None:
             from claude_swap.pool.cli import describe_report, login_pool
 
             result = login_pool(
-                self.switcher, form.url, form.anon_key, form.email, code
+                self.switcher, form.url, form.anon_key, form.email, form.code
             )
+            if result.signed_up:
+                print(f"Welcome to the pool: created your membership for {result.email}")
             print(f"Logged in as {result.email} ({result.role})")
             if result.guard_applied:
                 print(

@@ -7,7 +7,6 @@ import pytest
 from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
 from claude_swap.pool import client as client_mod
 from claude_swap.pool.cli import (
-    request_login_code,
     apply_pooled_defaults,
     login_pool,
     logout_pool,
@@ -31,10 +30,9 @@ def wired(fake_pool, monkeypatch, temp_home):
 
 
 def _login(wired, switcher, email: str):
-    """The two-step login: request the code, then log in with the one the
-    fake pool "sent"."""
-    request_login_code(wired.base_url, wired.anon_key, email)
-    return login_pool(switcher, wired.base_url, wired.anon_key, email, wired.codes[email])
+    """Log in as an existing fake member with their own code (password)."""
+    pw = next(u.password for u in wired.users.values() if u.email == email)
+    return login_pool(switcher, wired.base_url, wired.anon_key, email, pw)
 
 
 class TestLoginPool:
@@ -81,10 +79,17 @@ class TestLoginPool:
 
     def test_login_pool_wrong_code_raises_auth_error(self, wired, owner):
         s = _switcher()
-        request_login_code(wired.base_url, wired.anon_key, "owner@x.io")
         with pytest.raises(PoolAuthError):
             login_pool(s, wired.base_url, wired.anon_key, "owner@x.io", "wrong")
         assert load_session(s.backup_dir) is None
+
+    def test_login_pool_reports_a_first_time_sign_up(self, wired):
+        wired.signup_domains = ["x.io"]
+        s = _switcher()
+        result = login_pool(s, wired.base_url, wired.anon_key, "new@x.io", "team-code-1")
+        assert result.signed_up is True and result.role == "member"
+        again = login_pool(s, wired.base_url, wired.anon_key, "new@x.io", "team-code-1")
+        assert again.signed_up is False
 
     def test_login_pool_suggests_strikes_only_when_low(self, wired, owner):
         s = _switcher()
