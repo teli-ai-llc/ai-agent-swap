@@ -66,6 +66,18 @@ def _usage(pct: float, resets_at: str | None = None) -> dict:
     return {"five_hour": window, "seven_day": {"pct": 0.0}}
 
 
+_WEEK_S = 7 * 86400.0
+
+
+def _week_usage(pct: float, *, resets_at: float) -> dict:
+    """Usage whose 7d window is at ``pct`` and resets at the epoch ``resets_at``
+    (5h idle), so a pace-bound hard limit has a week to measure against."""
+    return {
+        "five_hour": {"pct": 0.0},
+        "seven_day": {"pct": pct, "resets_at": _iso_at(resets_at)},
+    }
+
+
 def _entry_for(value: dict | str | None, now: float) -> UsageEntry:
     """Synthesize the store entry a live fetch would have produced."""
     if isinstance(value, dict):
@@ -7028,6 +7040,64 @@ class TestAccountRules:
         out = harness.tick_with_usage({"1": _usage(50), "2": _usage(10), "3": _usage(10)})
         assert out is TickOutcome.SWITCHED
         assert self._switch(harness).trigger == "hard-limit"
+
+    def test_pace_hard_limit_is_the_weeks_progress_on_the_active_account(self, fleet):
+        # The backup is shared "to pace". 40% through its owner's week its
+        # cap is 40: 30% used is fine, 45% is the hard-limit escape — the
+        # number the user sees is the resolved one, never "100".
+        from claude_swap.rules import PACE
+
+        fleet.switcher.set_account_rule("3", hard_limit=PACE, priority=2, quiet=True)
+        fleet.make_live("c@example.com", 3)
+        reset = fleet.clock.now + 0.6 * _WEEK_S
+        out = fleet.tick_with_usage(
+            {"1": _usage(96), "2": _usage(97), "3": _week_usage(30, resets_at=reset)}
+        )
+        assert out is TickOutcome.NO_ACTION
+        detail = next(e.detail for e in fleet.events if isinstance(e, NoSwitchEvent))
+        assert detail == "30% < 40% hard limit"
+        fleet.events.clear()
+        out = fleet.tick_with_usage(
+            {"1": _usage(96), "2": _usage(97), "3": _week_usage(45, resets_at=reset)}
+        )
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 1
+        assert self._switch(fleet).trigger == "hard-limit"
+
+    def test_pace_cap_is_re_resolved_every_tick(self, fleet):
+        # 45% used is over the cap at 40% through the week and under it at
+        # 60%: the same stored rule bars the backup now and admits it later.
+        from claude_swap.rules import PACE
+
+        fleet.switcher.set_account_rule("3", hard_limit=PACE, priority=2, quiet=True)
+        reset = fleet.clock.now + 0.6 * _WEEK_S
+        usage = {"1": _usage(96), "2": _usage(97), "3": _week_usage(45, resets_at=reset)}
+        assert fleet.tick_with_usage(usage) is TickOutcome.BLOCKED
+        fleet.clock.advance(0.2 * _WEEK_S)
+        fleet.events.clear()
+        assert fleet.tick_with_usage(usage) is TickOutcome.SWITCHED
+        assert fleet.active_number() == 3
+
+    def test_pace_without_a_reset_time_is_only_the_number(self, fleet):
+        # No 7d resets_at → progress unknown → nothing but the rule's own
+        # number binds (none here), so the backup is a normal target.
+        from claude_swap.rules import PACE
+
+        fleet.switcher.set_account_rule("3", hard_limit=PACE, priority=2, quiet=True)
+        out = fleet.tick_with_usage({"1": _usage(96), "2": _usage(97), "3": _usage(45)})
+        assert out is TickOutcome.SWITCHED
+        assert fleet.active_number() == 3
+
+    def test_manual_strategies_resolve_pace_too(self, fleet):
+        from claude_swap.rules import PACE
+
+        sw = fleet.switcher
+        sw.set_account_rule("3", hard_limit=PACE, priority=2, quiet=True)
+        reset = fleet.clock.now + 0.6 * _WEEK_S
+        usage = {"1": _usage(96), "2": _usage(97), "3": _week_usage(45, resets_at=reset)}
+        assert sw._select_best_switchable("1", (), usage) == (None, "stay")
+        fleet.clock.advance(0.2 * _WEEK_S)
+        assert sw._select_best_switchable("1", (), usage) == ("3", "")
 
     def test_manual_best_strategy_honours_hard_limit_and_priority(self, fleet):
         # `cswap switch --strategy best`: never onto the capped backup, and a

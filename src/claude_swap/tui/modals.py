@@ -13,6 +13,7 @@ from textual.widgets import Button, Checkbox, Input, Label, Static
 
 from claude_swap.rules import (
     AccountRule,
+    PACE,
     parse_hard_limit,
     parse_priority,
     parse_swap_limit,
@@ -142,10 +143,12 @@ class AddTokenModal(ModalScreen["TokenForm | None"]):
 
 @dataclass
 class RuleForm:
-    """What the account-rules modal collects (already validated)."""
+    """What the account-rules modal collects (already validated).
+    ``hard_limit`` is a number or ``rules.PACE``, as ``parse_hard_limit``
+    returns it, for ``set_account_rule`` to apply."""
 
     swap_limit: float | None
-    hard_limit: float
+    hard_limit: float | str
     priority: int
     reset: bool = False
 
@@ -201,11 +204,16 @@ class RuleModal(ModalScreen["RuleForm | None"]):
                 id="swap",
                 type="number",
             )
+            if rule.hard_pace:
+                hard_value = "pace"
+            elif rule.hard_limit >= 100.0:
+                hard_value = ""
+            else:
+                hard_value = f"{rule.hard_limit:.10g}"
             yield Input(
-                value="" if rule.hard_limit >= 100.0 else f"{rule.hard_limit:.10g}",
-                placeholder="hard limit % (default 100)",
+                value=hard_value,
+                placeholder="hard limit: pace, or % (default 100)",
                 id="hard",
-                type="number",
             )
             yield Input(
                 value="" if rule.priority == 1 else str(rule.priority),
@@ -335,6 +343,7 @@ class PoolShareForm:
     shared: bool
     swap_limit: float | None
     hard_limit: float | None
+    hard_pace: bool = False  # the hard limit is the share of the week that has passed
 
 
 class PoolShareModal(ModalScreen["PoolShareForm | None"]):
@@ -366,11 +375,12 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
             if current is None or current.swap_limit is None
             else f"{current.swap_limit:.10g}"
         )
-        hard_value = (
-            ""
-            if current is None or current.hard_limit is None
-            else f"{current.hard_limit:.10g}"
-        )
+        if current is not None and current.hard_pace:
+            hard_value = "pace"
+        elif current is None or current.hard_limit is None:
+            hard_value = ""
+        else:
+            hard_value = f"{current.hard_limit:.10g}"
         with Vertical(classes="modal-box"):
             yield Label(
                 f"Share account {self._number} · {self._label}",
@@ -381,8 +391,8 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
                 "borrow it.\n"
                 "swap limit: pool members stop routing to it past this % "
                 "(blank = none).\n"
-                "hard limit: pool members may not use it past this % "
-                "(blank = none).",
+                "hard limit: % they may not use it past, or 'pace' = never "
+                "ahead of your week (blank = none).",
                 classes="modal-body",
             )
             yield Checkbox("Shared with the pool", value=shared, id="shared")
@@ -431,14 +441,17 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
                 else parse_hard_limit(hard_raw)
             )
             # A parsed hard limit of exactly 100 means "no limit" (matches
-            # the CLI's `cswap pool share --hard-limit 100`).
-            if hard_limit == 100.0:
+            # the CLI's `cswap pool share --hard-limit 100`); "pace" is the
+            # flag with no number.
+            hard_pace = hard_limit is PACE
+            if hard_limit == 100.0 or hard_pace:
                 hard_limit = None
         except ValueError as exc:
             self.query_one("#form-error", Static).update(str(exc))
             return
         self.dismiss(
-            PoolShareForm(shared=shared, swap_limit=swap_limit, hard_limit=hard_limit)
+            PoolShareForm(shared=shared, swap_limit=swap_limit, hard_limit=hard_limit,
+                          hard_pace=hard_pace)
         )
 
     def action_cancel(self) -> None:

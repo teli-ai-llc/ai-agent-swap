@@ -203,6 +203,12 @@ class FakePool:
                 out.sort(key=lambda r: r["updated_at"])
             return 200, json.dumps(out).encode()
 
+        if method in ("POST", "PATCH") and table == "pool_accounts" \
+                and self.schema_version == "1" and "share_hard_limit_pace" in payload:
+            # PostgREST on a pool that predates migration 0004
+            return 400, (b'{"code":"PGRST204","message":"Could not find the '
+                         b"'share_hard_limit_pace' column of 'pool_accounts' in the schema cache\"}")
+
         if method == "POST":
             if table == "pool_machines":
                 row = {"last_seen_at": _now_iso(), **payload}
@@ -224,7 +230,7 @@ class FakePool:
                 "credential": None, "credential_version": 0, "credential_fingerprint": None,
                 "updated_by_machine_id": None, "status": "ok", "needs_relogin_since": None,
                 "needs_relogin_reported_by": None, "shared": False,
-                "share_swap_limit": None, "share_hard_limit": None,
+                "share_swap_limit": None, "share_hard_limit": None, "share_hard_limit_pace": False,
                 "created_at": _now_iso(),
                 **payload,
                 "updated_by_user_id": user_id, "updated_at": _now_iso(),
@@ -267,7 +273,7 @@ class FakePool:
 
         if not (is_owner or is_admin):
             for col in ("owner_user_id", "shared", "share_swap_limit", "share_hard_limit",
-                        "email", "account_uuid", "organization_uuid"):
+                        "share_hard_limit_pace", "email", "account_uuid", "organization_uuid"):
                 if new.get(col) != old.get(col):
                     return 403, b'{"code":"42501","message":"pool: only the owner may change sharing or identity"}'
             if new["status"] != old["status"] and not (new["status"] == "needs_relogin" and old["status"] == "ok"):

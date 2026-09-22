@@ -117,9 +117,18 @@ class TestPush:
 
     def test_schema_mismatch_skips_loudly(self, sync_env, fake_pool):
         s, client, session = sync_env
-        fake_pool.schema_version = "2"
+        fake_pool.schema_version = "3"
         report = PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111").run_pass()
-        assert report.skipped and "schema" in report.skipped
+        assert report.skipped and "schema" in report.skipped and "upgrade cswap" in report.skipped
+
+    def test_both_known_schemas_sync(self, sync_env, fake_pool):
+        # v1 (before the pace column) and v2 are both spoken, so a teammate
+        # can update cswap before or after the admin migrates the pool.
+        s, client, session = sync_env
+        for version in ("1", "2"):
+            fake_pool.schema_version = version
+            report = PoolSync(s, client, session, machine_id="11111111-1111-1111-1111-111111111111").run_pass()
+            assert report.skipped is None
 
     def test_refreshed_session_is_saved(self, sync_env, fake_pool, owner):
         s, client, session = sync_env

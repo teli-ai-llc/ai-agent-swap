@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 from claude_swap import __version__, paths, printer
 from claude_swap.exceptions import ClaudeSwitchError
@@ -510,6 +511,7 @@ def _rule_command(argv: list[str]) -> None:
         parse_hard_limit,
         parse_priority,
         parse_swap_limit,
+        week_progress,
     )
     from claude_swap.settings import load_settings
 
@@ -520,6 +522,8 @@ def _rule_command(argv: list[str]) -> None:
             "looking for a better account while this one is active (default: "
             "autoswitch.threshold). hard limit: never use the account past this "
             "— not a switch target, and left at once when active (default 100). "
+            "'pace' (the bare --hard-limit) makes it the share of the account's "
+            "7-day window that has passed, so it is never used ahead of pace. "
             "priority: 1 is most preferred; lower numbers win, ties route by "
             "usage, and the engine returns to a higher-priority account as soon "
             "as it is healthy again (default 1)."
@@ -528,7 +532,8 @@ def _rule_command(argv: list[str]) -> None:
         epilog="""
 Examples:
   cswap rule                                  # list every account's rule
-  cswap rule 3 --priority 2 --hard-limit 50   # a backup: only when others are out, only to 50%
+  cswap rule 3 --priority 2 --hard-limit      # a backup: only when others are out, never ahead of its week
+  cswap rule 3 --priority 2 --hard-limit 50   # ... or only to a fixed 50%
   cswap rule 1 --swap-limit 95
   cswap rule 3 --hard-limit off               # clear one field
   cswap rule 3 --reset                        # clear all three
@@ -545,7 +550,8 @@ Examples:
         help="1-100, or 'off' for the global threshold",
     )
     parser.add_argument(
-        "--hard-limit", metavar="PCT", help="1-100, or 'off' (= 100)",
+        "--hard-limit", metavar="PCT|pace", nargs="?", const="pace",
+        help="'pace' (the bare flag): the share of the week that has passed; or 1-100, or 'off' (= 100)",
     )
     parser.add_argument(
         "--priority", metavar="N", help="1-99 (1 = most preferred), or 'off' (= 1)",
@@ -594,6 +600,7 @@ Examples:
                             "email": email,
                             "swapLimit": rule.swap_limit,
                             "hardLimit": rule.hard_limit,
+                            "hardLimitPace": rule.hard_pace,
                             "priority": rule.priority,
                         }
                         for num, email, rule in rows
@@ -604,6 +611,15 @@ Examples:
             if not rows:
                 print(dimmed("No accounts are managed yet."))
                 return
+            # A pace-bound limit is shown with the number it means right now,
+            # from the usage already on disk (never a fetch).
+            entries: dict = {}
+            if any(rule is not None and rule.hard_pace for _, _, rule in rows):
+                try:
+                    entries = switcher.usage_entries_by_account(fetch=set())
+                except Exception:
+                    entries = {}
+            now = time.time()
             print(bolded("Account rules:"))
             for num, email, rule in rows:
                 if rule is None:
@@ -613,7 +629,14 @@ Examples:
                     if rule.swap_limit is not None
                     else f"{threshold:.10g}% (threshold)"
                 )
-                hard = f"{rule.hard_limit:.10g}%"
+                if rule.hard_pace:
+                    entry = entries.get(num)
+                    progress = week_progress(entry.last_good if entry else None, now)
+                    hard = "pace" + (f" ({progress:.0f}%)" if progress is not None else "")
+                    if rule.hard_limit < 100.0:
+                        hard += f" ≤{rule.hard_limit:.10g}%"
+                else:
+                    hard = f"{rule.hard_limit:.10g}%"
                 print(
                     f"  {num}: {email}  "
                     f"{muted(f'priority {rule.priority} · swap {swap} · hard {hard}')}"
@@ -642,6 +665,7 @@ Examples:
                 "email": email,
                 "swapLimit": rule.swap_limit,
                 "hardLimit": rule.hard_limit,
+                "hardLimitPace": rule.hard_pace,
                 "priority": rule.priority,
             }, indent=2))
     except ClaudeSwitchError as e:

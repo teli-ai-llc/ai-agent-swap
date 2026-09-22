@@ -21,7 +21,13 @@ from claude_swap.pool.client import PoolAccountRow, PoolClient
 from claude_swap.pool.session import PoolSession, save_session
 from claude_swap.settings import atomic_write_json
 
-POOL_SCHEMA_VERSION = 1
+#: Pool schemas this cswap speaks. v1 is the original; v2 (migration 0004)
+#: adds ``share_hard_limit_pace``. Both are accepted so a teammate can update
+#: cswap before or after the admin migrates: on a v1 pool only pace sharing
+#: is refused (``publish_slot``), on a v2 pool a v1 cswap stops syncing.
+POOL_SCHEMA_VERSIONS = (1, 2)
+POOL_SCHEMA_VERSION = POOL_SCHEMA_VERSIONS[-1]
+PACE_SCHEMA_VERSION = 2
 POOL_STATE_FILENAME = "pool_state.json"
 
 _logger = logging.getLogger("claude-swap")
@@ -30,10 +36,24 @@ _logger = logging.getLogger("claude-swap")
 #: What the owner allowed when this machine last applied the row's limits,
 #: kept on the borrowed slot's record so a later change can tell "the borrower
 #: never touched it" (follow the owner both ways) from "the borrower chose
-#: something stricter" (keep it). Absent on rows landed before 2026-09-21.
+#: something stricter" (keep it). Absent on rows landed before 2026-09-21;
+#: the pace key is absent on rows landed before schema v2.
 _OWNER_SWAP_KEY = "poolShareSwapLimit"
 _OWNER_HARD_KEY = "poolShareHardLimit"
+_OWNER_PACE_KEY = "poolShareHardPace"
 _NO_LIMIT = float("inf")
+
+
+def schema_unsupported(version: int) -> str | None:
+    """The skip/refusal text for a pool schema this cswap does not speak,
+    or None when it does."""
+    if version in POOL_SCHEMA_VERSIONS:
+        return None
+    spoken = "/".join(f"v{v}" for v in POOL_SCHEMA_VERSIONS)
+    return (
+        f"pool schema is v{version}, this cswap speaks {spoken}; "
+        + ("upgrade cswap" if version > POOL_SCHEMA_VERSION else "the admin must migrate the pool")
+    )
 
 
 def reconcile_owner_limit(current: float | None, previous: float | None, new: float | None,
@@ -49,6 +69,16 @@ def reconcile_owner_limit(current: float | None, previous: float | None, new: fl
         return new
     stricter = min(_NO_LIMIT if current is None else current, _NO_LIMIT if new is None else new)
     return None if stricter == _NO_LIMIT else stricter
+
+
+def reconcile_owner_pace(current: bool, previous: bool | None, new: bool,
+                         *, previous_known: bool) -> bool:
+    """The pace flag's twin of ``reconcile_owner_limit``: on is the stricter
+    state. Untouched by the borrower -> follow the owner either way;
+    otherwise on if either side has it on."""
+    if previous_known and current == previous:
+        return new
+    return current or new
 
 
 @dataclass
@@ -130,12 +160,9 @@ class PoolSync:
             if fresh is not self.session:
                 self.session = fresh
                 save_session(self.switcher.backup_dir, fresh)
-            version = self.client.schema_version(self.session)
-            if version != POOL_SCHEMA_VERSION:
-                report.skipped = (
-                    f"pool schema is v{version}, this cswap speaks v{POOL_SCHEMA_VERSION}; "
-                    + ("upgrade cswap" if version > POOL_SCHEMA_VERSION else "the admin must migrate the pool")
-                )
+            unsupported = schema_unsupported(self.client.schema_version(self.session))
+            if unsupported:
+                report.skipped = unsupported
                 return report
         except PoolAuthError as e:
             report.skipped = f"pool session refused ({e}); run: cswap pool login"
@@ -349,16 +376,23 @@ class PoolSync:
                                          row.share_swap_limit, previous_known=known)
             hard = reconcile_owner_limit(current_hard, record.get(_OWNER_HARD_KEY),
                                          row.share_hard_limit, previous_known=known)
+            # A record from before schema v2 remembers no pace: the owner had
+            # none to remember, so "untouched" is a borrower still at off.
+            pace = reconcile_owner_pace(rule.hard_pace, record.get(_OWNER_PACE_KEY, False),
+                                        row.share_hard_limit_pace, previous_known=known)
             unchanged = (
-                known and swap == rule.swap_limit and hard == current_hard
+                known and swap == rule.swap_limit and hard == current_hard and pace == rule.hard_pace
                 and record.get(_OWNER_SWAP_KEY) == row.share_swap_limit
                 and record.get(_OWNER_HARD_KEY) == row.share_hard_limit
+                and record.get(_OWNER_PACE_KEY, False) == row.share_hard_limit_pace
             )
             if unchanged:
                 return
-            apply_rule(record, swap_limit=swap, hard_limit=100.0 if hard is None else hard)
+            apply_rule(record, swap_limit=swap, hard_limit=100.0 if hard is None else hard,
+                       hard_pace=pace)
             record[_OWNER_SWAP_KEY] = row.share_swap_limit
             record[_OWNER_HARD_KEY] = row.share_hard_limit
+            record[_OWNER_PACE_KEY] = row.share_hard_limit_pace
             data["lastUpdated"] = get_timestamp()
             self.switcher._write_json(self.switcher.sequence_file, data)
 
@@ -398,9 +432,11 @@ class PoolSync:
             }
             if not mine:
                 apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
-                           hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0)
+                           hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0,
+                           hard_pace=row.share_hard_limit_pace)
                 record[_OWNER_SWAP_KEY] = row.share_swap_limit
                 record[_OWNER_HARD_KEY] = row.share_hard_limit
+                record[_OWNER_PACE_KEY] = row.share_hard_limit_pace
             data.setdefault("accounts", {})[num] = record
             if int(num) not in data.setdefault("sequence", []):
                 data["sequence"].append(int(num))
@@ -445,7 +481,7 @@ class PoolSync:
 
     # -- sharing (Task 11) ---------------------------------------------------------
     def publish_slot(self, num: str, *, shared: bool, swap_limit: float | None,
-                     hard_limit: float | None) -> PoolAccountRow:
+                     hard_limit: float | None, hard_pace: bool = False) -> PoolAccountRow:
         data = self.switcher._get_sequence_data() or {}
         record = (data.get("accounts") or {}).get(num)
         if record is None:
@@ -458,18 +494,35 @@ class PoolSync:
         account_uuid = blob["oauthAccount"]["accountUuid"]
         org_uuid = blob["oauthAccount"].get("organizationUuid") or ""
 
+        # The pace column exists from schema v2 on. Before that, sending it
+        # is a 400 from PostgREST, so a plain share leaves it out entirely
+        # (None) and a pace share is refused by name.
+        version = self.client.schema_version(self.session)
+        if version >= PACE_SCHEMA_VERSION:
+            pace_column: bool | None = hard_pace
+        elif hard_pace:
+            raise PoolError(
+                f"this pool's schema is v{version}; a pace hard limit needs migration "
+                f"0004 (supabase/migrations/0004_pool_pace_limit.sql) applied by the pool admin"
+            )
+        else:
+            pace_column = None
+
         row = self.client.find_account(self.session, account_uuid, org_uuid)
         if row is None:
+            body = {
+                "account_uuid": account_uuid, "organization_uuid": org_uuid,
+                "email": record.get("email", ""), "organization_name": record.get("organizationName", "") or "",
+                "owner_user_id": self.session.user_id,
+                "credential": blob, "credential_version": blob_version(blob),
+                "credential_fingerprint": blob_fingerprint(blob),
+                "updated_by_machine_id": self.machine_id,
+                "shared": shared, "share_swap_limit": swap_limit, "share_hard_limit": hard_limit,
+            }
+            if pace_column is not None:
+                body["share_hard_limit_pace"] = pace_column
             try:
-                row = self.client.create_account(self.session, {
-                    "account_uuid": account_uuid, "organization_uuid": org_uuid,
-                    "email": record.get("email", ""), "organization_name": record.get("organizationName", "") or "",
-                    "owner_user_id": self.session.user_id,
-                    "credential": blob, "credential_version": blob_version(blob),
-                    "credential_fingerprint": blob_fingerprint(blob),
-                    "updated_by_machine_id": self.machine_id,
-                    "shared": shared, "share_swap_limit": swap_limit, "share_hard_limit": hard_limit,
-                })
+                row = self.client.create_account(self.session, body)
             except PoolAuthError:
                 raise
             except PoolError as e:
@@ -488,7 +541,8 @@ class PoolSync:
                             "only the owner can publish or change it")
         else:
             self.client.update_sharing(self.session, row.id, shared=shared,
-                                       swap_limit=swap_limit, hard_limit=hard_limit)
+                                       swap_limit=swap_limit, hard_limit=hard_limit,
+                                       hard_pace=pace_column)
             if row.status != "ok":
                 self.client.set_status(self.session, row.id, "ok", self.machine_id)
             self.client.push_credential(self.session, row.id, blob, blob_version(blob),

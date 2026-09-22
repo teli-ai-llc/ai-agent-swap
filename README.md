@@ -125,11 +125,18 @@ you leave out is reset to "no limit".
 
 ```bash
 cswap list                                         # find your slot number
-cswap pool share 1 --swap-limit 80 --hard-limit 50
+cswap pool share 1 --swap-limit 80 --hard-limit
 ```
 
-- **hard limit 50** means teammates never use your login past 50% of its
-  5-hour or 7-day window. The rest stays yours.
+- **`--hard-limit`** on its own is the **pace** limit: teammates may use your
+  login only up to the share of your 7-day window that has already passed.
+  Two days into your week that is about 29%, five days in about 71%, and
+  right after your weekly reset it is 0 until the clock has moved. Whatever
+  they use, your login is never ahead of pace when you come back to it, and
+  the cap grows on its own; there is nothing to adjust.
+- **`--hard-limit 50`** is the fixed alternative: never past 50% of the
+  5-hour or 7-day window, whatever the day. Use it when you want a flat
+  reserve instead of a schedule.
 - **swap limit 80** is where a teammate's cswap starts looking for a better
   account while it is on yours.
 - `--private` publishes it for your own machines only, not the team.
@@ -181,8 +188,9 @@ yours as soon as they have room.
 **How much teammates may use of MY login.** Re-run share with both flags:
 
 ```bash
-cswap pool share 1 --swap-limit 70 --hard-limit 40
-cswap pool share 1 --swap-limit off --hard-limit off     # no limits
+cswap pool share 1 --swap-limit 80 --hard-limit         # pace: never ahead of my week
+cswap pool share 1 --swap-limit 70 --hard-limit 40      # or a fixed 40%
+cswap pool share 1 --swap-limit off --hard-limit off    # no limits
 ```
 
 New limits reach every teammate's machine on its next sync, within about 30
@@ -191,18 +199,20 @@ seconds. Nobody has to do anything.
 **How much I use of a BORROWED login.** Borrowed logins arrive with the
 owner's limits and follow the owner's later changes. You can make yours
 stricter and it will stick. A looser value is pulled back to the owner's
-limit at the next sync of that login.
+limit at the next sync of that login. `cswap rule` shows a pace limit with
+the number it means right now, e.g. `hard pace (61%)`.
 
 ```bash
 cswap rule                                   # show every account's rule
-cswap rule 4 --hard-limit 30                 # use slot 4 only to 30%
+cswap rule 4 --hard-limit                    # use slot 4 only up to where its week stands
+cswap rule 4 --hard-limit 30                 # or only to a fixed 30%
 ```
 
 **My own accounts.**
 
 ```bash
 cswap rule 1 --swap-limit 95                 # leave my main account a bit later
-cswap rule 2 --priority 2 --hard-limit 50    # treat my second account as a backup
+cswap rule 2 --priority 2 --hard-limit       # my second account is a backup, kept on pace
 cswap rule 2 --reset                         # back to defaults
 ```
 
@@ -363,17 +373,18 @@ Defaults like the threshold and cooldown are configurable with `cswap config set
 Give each account its own limits and a priority; the auto-switcher and the `best` / `next-available` strategies honour them:
 
 - **swap limit** — where auto-switch starts looking for a better account while this one is active (default: the global `autoswitch.threshold`).
-- **hard limit** — never use the account past this. It is not a switch target once there, and if it is the active account the engine leaves it at once, even far below its swap limit.
+- **hard limit** — never use the account past this. It is not a switch target once there, and if it is the active account the engine leaves it at once, even far below its swap limit. The bare `--hard-limit` (or `--hard-limit pace`) is the **pace** limit: the share of the account's 7-day window that has already passed — 60% through the week, 60% — recomputed on every tick, so the account is never used ahead of pace and the cap needs no adjusting. A number (`--hard-limit 50`) is the fixed alternative. Like a fixed limit, pace applies to whichever window is highest (5-hour, 7-day, or a per-model weekly one); right after a weekly reset it is 0 until the clock has moved, and while the 7-day window's reset time is not known yet nothing but the number binds.
 - **priority** — 1 is most preferred. Candidates are ranked by priority first, then by usage; while a lower-priority account is active, the engine returns to a higher-priority one as soon as it is healthy again.
 
 ```bash
-cswap rule                                   # every account's rule
-cswap rule 3 --priority 2 --hard-limit 50    # a borrowed backup: only when mine are out, and only to 50%
+cswap rule                                   # every account's rule (a pace limit shows its current number)
+cswap rule 3 --priority 2 --hard-limit       # a borrowed backup: only when mine are out, never ahead of its week
+cswap rule 3 --priority 2 --hard-limit 50    # ... or only to a fixed 50%
 cswap rule 1 --swap-limit 95                 # leave this account a little later than the global threshold
 cswap rule 3 --reset                         # back to the defaults
 ```
 
-Example: two accounts of your own (priority 1) and a friend's backup (priority 2, hard limit 50). Auto-switch routes between your own two by usage; when both are spent it moves to the backup; the moment the backup reaches 50% it returns to whichever of yours has room — even though both are past their swap limits — and it never lands on the backup again until its window resets. The TUI shows each rule on the account card (a red tick on the bars marks the hard limit) and edits it under *Account rules…*.
+Example: two accounts of your own (priority 1) and a friend's backup (priority 2, hard limit pace). Auto-switch routes between your own two by usage; when both are spent it moves to the backup; the moment the backup reaches where its owner's week stands — say 40%, three days in — it returns to whichever of yours has room, even though both are past their swap limits, and it does not land on the backup again until the week has moved on. The TUI shows each rule on the account card (a red tick on the bars marks the hard limit, moving along with the week for a pace one) and edits it under *Account rules…*, where `pace` is accepted in the hard-limit field.
 
 ### Run multiple accounts at the same time (session mode)
 
@@ -607,7 +618,8 @@ pool code. No invites, no emails. The full walkthrough is the
 ```bash
 cswap pool login                     # once per machine: pool URL, anon key, email, pool code
 cswap add --pool                     # publish the login you are signed in with
-cswap pool share 2 --swap-limit 80 --hard-limit 50   # what borrowers may use of it
+cswap pool share 2 --swap-limit 80 --hard-limit      # what borrowers may use of it: never ahead of my week
+cswap pool share 2 --swap-limit 80 --hard-limit 50   # ... or a fixed 50%
 cswap pool unshare 2                 # withdraw it
 cswap pool status                    # who you are, what is linked, what needs attention
 cswap sync --install-service         # macOS: keep syncing at login (else: cswap sync, or cswap auto / the TUI)
@@ -627,8 +639,11 @@ limits; your own accounts stay priority 1. When the owner changes those
 limits (`cswap pool share` again), every machine that already holds the
 login follows on its next pass: a borrower who left the limits alone gets the
 new ones, tighter or looser; a borrower's own stricter `cswap rule` survives;
-anything looser than the owner allows is pulled back down. Priority is always
-the borrower's own. When a login's refresh token dies
+anything looser than the owner allows is pulled back down. The pace flag
+follows the same rule, with "on" as the stricter state: an owner's pace
+reaches every borrower, a borrower's own pace survives, and a borrower's
+fixed number under an owner's pace means the stricter of the two at any
+moment. Priority is always the borrower's own. When a login's refresh token dies
 for good (it lapsed, or a real logout), whichever machine notices flags it,
 and the owner sees "your account … needs re-login" on `cswap list` and in
 the dashboard. The owner logs in with Claude Code and runs `cswap add`; the

@@ -56,6 +56,21 @@ class TestPublishSlot:
         assert first.id == second.id and second.shared and second.share_hard_limit == 30.0
         assert len(fake_pool.rows()) == 1
 
+    def test_pace_needs_the_v2_pool_and_plain_shares_never_send_the_column(self, owner_env, fake_pool):
+        s, client, session = owner_env
+        sync = PoolSync(s, client, session, machine_id=MID)
+        with pytest.raises(PoolError, match="0004"):
+            sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None, hard_pace=True)
+        assert fake_pool.rows() == []
+        row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=50.0)  # v1: no column sent
+        assert row.share_hard_limit == 50.0 and row.share_hard_limit_pace is False
+        fake_pool.schema_version = "2"
+        row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=None, hard_pace=True)
+        assert row.share_hard_limit_pace is True and row.share_hard_limit is None
+        assert fake_pool.row(row.id)["share_hard_limit_pace"] is True
+        row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=50.0)
+        assert row.share_hard_limit_pace is False and row.share_hard_limit == 50.0
+
     def test_someone_elses_account_is_refused(self, owner_env, fake_pool, borrower):
         s, client, session = owner_env
         theirs = _publish_row(fake_pool, client, borrower, "acct-mine", "rt-0", 500)

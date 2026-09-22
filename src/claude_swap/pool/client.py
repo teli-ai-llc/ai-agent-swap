@@ -68,6 +68,9 @@ class PoolAccountRow:
     updated_by_machine_id: str | None = None
     needs_relogin_since: str | None = None
     needs_relogin_reported_by: str | None = None
+    # Schema v2 (migration 0004): the owner's hard limit also tracks the
+    # week's progress. A v1 row has no column and reads False.
+    share_hard_limit_pace: bool = False
 
     @classmethod
     def from_json(cls, d: dict) -> PoolAccountRow:
@@ -96,6 +99,7 @@ class PoolAccountRow:
             shared=bool(d.get("shared")),
             share_swap_limit=_num_or_none(d.get("share_swap_limit")),
             share_hard_limit=_num_or_none(d.get("share_hard_limit")),
+            share_hard_limit_pace=d.get("share_hard_limit_pace") is True,
             updated_at=str(d.get("updated_at") or ""),
             updated_by_user_id=d.get("updated_by_user_id"),
             updated_by_machine_id=d.get("updated_by_machine_id"),
@@ -317,11 +321,16 @@ class PoolClient:
         return len(rows) == 1
 
     def update_sharing(self, session: PoolSession, account_id: str, *, shared: bool,
-                       swap_limit: float | None, hard_limit: float | None) -> None:
+                       swap_limit: float | None, hard_limit: float | None,
+                       hard_pace: bool | None = None) -> None:
+        """``hard_pace=None`` leaves the pace column untouched — and unsent,
+        which is what a v1 pool (no such column) needs."""
+        body: dict = {"shared": shared, "share_swap_limit": swap_limit, "share_hard_limit": hard_limit}
+        if hard_pace is not None:
+            body["share_hard_limit_pace"] = bool(hard_pace)
         rows = self._rest(
             session, "PATCH", "pool_accounts", params={"id": f"eq.{account_id}"},
-            body={"shared": shared, "share_swap_limit": swap_limit, "share_hard_limit": hard_limit},
-            prefer="return=representation",
+            body=body, prefer="return=representation",
         )
         if not rows:
             raise PoolError("pool account not found or not yours")

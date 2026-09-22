@@ -12,7 +12,7 @@ from claude_swap import cli
 from claude_swap.pool import client as client_mod
 from claude_swap.pool.session import load_session
 from claude_swap.settings import load_pool_settings
-from tests.pool.conftest import _publish_row, _switcher
+from tests.pool.conftest import _publish_row, _seed, _switcher
 
 
 @pytest.fixture
@@ -142,6 +142,43 @@ class TestLogin:
         with pytest.raises(SystemExit):
             _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key, "--email", "ghost@x.io"])
         assert "no pool_members row" in capsys.readouterr().err
+
+
+class TestShare:
+    def _login_owner(self, wired, monkeypatch):
+        _answer_code(wired, monkeypatch, "owner@x.io")
+        _run(["pool", "login", "--url", wired.base_url, "--anon-key", wired.anon_key,
+              "--email", "owner@x.io"])
+
+    def test_bare_hard_limit_flag_means_pace(self, wired, owner, monkeypatch, capsys):
+        wired.schema_version = "2"
+        s = _switcher()
+        _seed(s, "1", "acct-1@x.io", "acct-1", "rt-1", 1_000)
+        self._login_owner(wired, monkeypatch)
+        _run(["pool", "share", "1", "--swap-limit", "80", "--hard-limit"])
+        assert "Shared acct-1@x.io  swap 80  hard pace" in capsys.readouterr().out
+        row = next(iter(wired.accounts.values()))
+        assert row["share_hard_limit_pace"] is True and row["share_hard_limit"] is None
+        assert row["share_swap_limit"] == 80.0
+        # a number turns pace off again (the flag is sent, not left alone)
+        _run(["pool", "share", "1", "--swap-limit", "80", "--hard-limit", "50"])
+        assert "hard 50" in capsys.readouterr().out
+        row = next(iter(wired.accounts.values()))
+        assert row["share_hard_limit_pace"] is False and row["share_hard_limit"] == 50.0
+
+    def test_pace_on_a_v1_pool_names_the_migration(self, wired, owner, monkeypatch, capsys):
+        s = _switcher()
+        _seed(s, "1", "acct-1@x.io", "acct-1", "rt-1", 1_000)
+        self._login_owner(wired, monkeypatch)
+        with pytest.raises(SystemExit) as info:
+            _run(["pool", "share", "1", "--hard-limit", "pace"])
+        assert info.value.code == 1
+        assert "0004" in capsys.readouterr().err
+        assert wired.accounts == {}
+        # a plain share still works on v1: the pace column is never sent
+        _run(["pool", "share", "1", "--swap-limit", "80", "--hard-limit", "50"])
+        assert "hard 50" in capsys.readouterr().out
+        assert next(iter(wired.accounts.values()))["share_hard_limit"] == 50.0
 
 
 class TestLogoutAndStatus:

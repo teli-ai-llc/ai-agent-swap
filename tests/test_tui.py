@@ -1818,6 +1818,28 @@ class TestAccountRulesUI:
                 ("2", {"swap_limit": 95.0, "hard_limit": 50.0, "priority": 2})
             ]
 
+    async def test_rule_editor_accepts_pace_as_the_hard_limit(self, tmp_path):
+        from claude_swap.rules import PACE
+
+        fake = FakeSwitcher(
+            [make_account(1, active=True), make_account(2)], tmp_path
+        )
+        saved: list[tuple] = []
+        fake.set_account_rule = lambda number, **kw: saved.append((number, kw))
+        app = make_app(fake)
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            app.open_rule_editor("2")
+            await pilot.pause()
+            from textual.widgets import Input
+
+            app.screen.query_one("#hard", Input).value = "pace"
+            await pilot.press("enter")
+            await settle(pilot)
+            assert saved == [
+                ("2", {"swap_limit": None, "hard_limit": PACE, "priority": 1})
+            ]
+
     async def test_rule_editor_rejects_bad_input_and_defaults_button_resets(self, tmp_path):
         fake = FakeSwitcher(
             [make_account(1, active=True), make_account(2)], tmp_path

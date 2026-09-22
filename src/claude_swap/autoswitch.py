@@ -51,7 +51,12 @@ from claude_swap.poll_policy import (
     RESET_SLACK_S,
     binding_pct,
 )
-from claude_swap.rules import AccountRule, cap_headroom, effective_threshold
+from claude_swap.rules import (
+    AccountRule,
+    cap_headroom,
+    effective_threshold,
+    resolve_rule,
+)
 from claude_swap.settings import AutoSwitchSettings, atomic_write_json, parse_model_names
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.usage_store import (
@@ -717,6 +722,10 @@ class AutoSwitchEngine:
         # Per-tick snapshot of every slot's switching rule (rules.py) and its
         # effective threshold on the capped-headroom scale. Re-read each tick
         # so `cswap rule` / the TUI editor apply without restarting the loop.
+        # ``_raw_rules`` is the snapshot as stored; ``_rules`` is what it
+        # means this tick once usage is known (a pace-bound hard limit is
+        # the week's progress, see ``_resolve_rules``).
+        self._raw_rules: dict[str, AccountRule] = {}
         self._rules: dict[str, AccountRule] = {}
         self._thresholds: dict[str, float] = {}
 
@@ -724,14 +733,34 @@ class AutoSwitchEngine:
 
     def _load_rules(self) -> None:
         try:
-            self._rules = self.switcher.account_rules()
+            self._raw_rules = self.switcher.account_rules()
         except Exception:  # a torn sequence read must not kill the loop
-            self._rules = {}
+            self._raw_rules = {}
+        self._rules = dict(self._raw_rules)
+        self._map_thresholds()
+
+    def _map_thresholds(self) -> None:
         threshold = self.settings.threshold
         self._thresholds = {
             num: effective_threshold(rule, threshold)
             for num, rule in self._rules.items()
         }
+
+    def _resolve_rules(self, usage: dict[str, dict | str | None]) -> None:
+        """Pin every pace-bound rule to the number it means at this tick
+        (``rules.resolve_rule``) now that usage is known, and re-map the
+        thresholds onto the resolved caps. Always from the stored snapshot,
+        so a later call in the same tick with fuller usage (the escalation
+        fetch) resolves a slot the first call had no data for. A no-op for
+        a fleet without pace-bound rules."""
+        raw = getattr(self, "_raw_rules", {})
+        if not any(rule.hard_pace for rule in raw.values()):
+            return
+        now = self.clock()
+        self._rules = {
+            num: resolve_rule(rule, usage.get(num), now) for num, rule in raw.items()
+        }
+        self._map_thresholds()
 
     def _rule_for(self, num: str) -> AccountRule:
         # getattr: the pure predicates below are also driven directly by
@@ -750,6 +779,7 @@ class AutoSwitchEngine:
     def _capped_headroom_by_account(
         self, usage: dict[str, dict | str | None]
     ) -> dict[str, float | None]:
+        self._resolve_rules(usage)
         return {
             num: cap_headroom(h, self._rule_for(num))
             for num, h in _headroom_by_account(usage, self._models).items()
@@ -2191,6 +2221,7 @@ class AutoSwitchEngine:
             scheduled=not stale_candidate_plan,
         )
         usage = {num: entry.decision_value() for num, entry in entries.items()}
+        self._resolve_rules(usage)
 
         active_value = usage.get(current)
         active_headroom = cap_headroom(

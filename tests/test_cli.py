@@ -1464,8 +1464,35 @@ class TestAliasCommand:
         payload = _json.loads(capsys.readouterr().out)
         assert payload["rules"] == [{
             "number": 2, "email": "work@co.com",
-            "swapLimit": 95.0, "hardLimit": 50.0, "priority": 2,
+            "swapLimit": 95.0, "hardLimit": 50.0, "hardLimitPace": False, "priority": 2,
         }]
+
+    def test_rule_bare_hard_limit_flag_means_pace(self, temp_home, capsys):
+        import json as _json
+
+        self._seeded_switcher_env(temp_home)
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(["2", "--priority", "2", "--hard-limit"])
+        record = ClaudeAccountSwitcher()._get_sequence_data()["accounts"]["2"]
+        assert record["hardLimitPace"] is True and "hardLimit" not in record
+        assert "p2 · hard pace" in capsys.readouterr().out
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command([])
+        out = capsys.readouterr().out
+        assert "priority 2 · swap" in out and "· hard pace" in out  # no usage yet: no (NN%)
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(["--json"])
+        payload = _json.loads(capsys.readouterr().out)
+        assert payload["rules"][0]["hardLimit"] == 100.0
+        assert payload["rules"][0]["hardLimitPace"] is True
+
+        with patch("os.geteuid", return_value=1000, create=True):
+            cli._rule_command(["2", "--hard-limit", "50", "--json"])
+        assert _json.loads(capsys.readouterr().out)["hardLimitPace"] is False
+        record = ClaudeAccountSwitcher()._get_sequence_data()["accounts"]["2"]
+        assert "hardLimitPace" not in record and record["hardLimit"] == 50.0
 
     def test_rule_off_clears_one_field_and_reset_clears_all(self, temp_home, capsys):
         self._seeded_switcher_env(temp_home)

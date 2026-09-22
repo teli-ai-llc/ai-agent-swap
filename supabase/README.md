@@ -11,8 +11,8 @@ do not matter.
 ## One-time setup
 
 1. Apply the migrations in order: `migrations/0001_pool.sql`,
-   `0002_pool_hardening.sql`, `0003_pool_signup.sql` (SQL editor,
-   `supabase db push`, or the MCP `apply_migration` tool).
+   `0002_pool_hardening.sql`, `0003_pool_signup.sql`, `0004_pool_pace_limit.sql`
+   (SQL editor, `supabase db push`, or the MCP `apply_migration` tool).
 2. Allow your email domain (SQL editor):
    ```sql
    insert into public.pool_meta (key, value) values ('signup_domains', 'teli.ai')
@@ -49,11 +49,30 @@ is only asked for at login.
 
 The same statement narrowed to one address resets a single member.
 
+## Pace limits: migrating a pool that predates 0004 (schema v2)
+
+`0004_pool_pace_limit.sql` adds `pool_accounts.share_hard_limit_pace` — the
+owner's hard limit that tracks the week (`cswap pool share N --hard-limit`,
+see the README) — and sets `pool_meta.schema_version` to `2`.
+
+cswap speaks v1 and v2, so the order does not matter much:
+
+- On a v1 pool everything works except a pace share, which is refused with
+  "needs migration 0004"; teammates can update cswap whenever.
+- Once 0004 has run, a cswap that only speaks v1 (before 2026-09-22) stops
+  syncing with "pool schema is v2, this cswap speaks v1; upgrade cswap". That
+  is deliberate: a client that cannot see the pace flag would otherwise keep
+  borrowing past it. `uv tool install --force git+…` fixes it.
+
+Apply it like the others (SQL editor, `supabase db push`, or the MCP
+`apply_migration` tool); it is a single transaction and needs no downtime.
+
 ## Rules enforced by the database, not by cswap
 
 - a push with a lower `credential_version` than the row is rejected;
 - a push with a higher version clears `needs_relogin`, whoever pushes it;
-- only the owner (or an admin) changes `shared`, the limits, or withdraws;
+- only the owner (or an admin) changes `shared`, the limits (the pace flag
+  included), or withdraws;
 - any member may flag a shared row `needs_relogin`;
 - a member only inserts usage events and machines as themselves;
 - new auth users outside `signup_domains` are refused; inside them they get

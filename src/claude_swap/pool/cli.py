@@ -15,7 +15,15 @@ from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
 from claude_swap.pool.client import PoolClient
 from claude_swap.pool.guard import enforce_remote_control_guard, remote_control_guard_gaps
 from claude_swap.pool.session import clear_session, load_session, machine_id, save_session
-from claude_swap.pool.sync import POOL_SCHEMA_VERSION, PassReport, PoolSync, _ago, build_sync, load_state, reset_state
+from claude_swap.pool.sync import (
+    PassReport,
+    PoolSync,
+    _ago,
+    build_sync,
+    load_state,
+    reset_state,
+    schema_unsupported,
+)
 from claude_swap.printer import accent, bolded, dimmed, error as print_error, warning as print_warning, yellowed
 from claude_swap.settings import load_pool_settings, load_settings, set_setting
 from claude_swap.switcher import ClaudeAccountSwitcher
@@ -94,9 +102,9 @@ def login_pool(switcher: ClaudeAccountSwitcher, url: str, anon_key: str, email: 
     """
     client = PoolClient(url, anon_key)
     session, signed_up = _sign_in_or_up(client, email, code)
-    version = client.schema_version(session)
-    if version != POOL_SCHEMA_VERSION:
-        raise PoolError(f"pool schema is v{version}; this cswap speaks v{POOL_SCHEMA_VERSION}")
+    unsupported = schema_unsupported(client.schema_version(session))
+    if unsupported:
+        raise PoolError(unsupported)
     member = client.member(session)
     client.register_machine(session, machine_id(switcher.backup_dir), platform.node(), __version__)
     guard_applied = tuple(enforce_remote_control_guard())
@@ -220,7 +228,10 @@ def pool_command(argv: list[str]) -> None:
     p_share = sub.add_parser("share", help="Publish an account, or change its sharing")
     p_share.add_argument("account", metavar="NUM|EMAIL")
     p_share.add_argument("--swap-limit", metavar="PCT", help="1-100 or 'off'")
-    p_share.add_argument("--hard-limit", metavar="PCT", help="1-100 or 'off'")
+    p_share.add_argument(
+        "--hard-limit", metavar="PCT|pace", nargs="?", const="pace",
+        help="'pace' (the bare flag): the share of the week that has passed; or 1-100, or 'off'",
+    )
     p_share.add_argument("--private", action="store_true", help="Publish for your own machines only")
 
     p_unshare = sub.add_parser("unshare", help="Withdraw an account from the pool")
@@ -307,7 +318,7 @@ def _status(switcher: ClaudeAccountSwitcher, args) -> None:
 
 
 def _share(switcher: ClaudeAccountSwitcher, args) -> None:
-    from claude_swap.rules import parse_hard_limit, parse_swap_limit
+    from claude_swap.rules import PACE, parse_hard_limit, parse_swap_limit
     sync = build_sync(switcher)
     if sync is None:
         raise PoolError("not logged in to a pool (or pool.enabled is false); run: cswap pool login")
@@ -317,10 +328,18 @@ def _share(switcher: ClaudeAccountSwitcher, args) -> None:
     swap = parse_swap_limit(args.swap_limit) if args.swap_limit is not None else None
     hard = parse_hard_limit(args.hard_limit) if args.hard_limit is not None else None
     row = sync.publish_slot(num, shared=not args.private, swap_limit=swap,
-                            hard_limit=None if hard in (None, 100.0) else hard)
+                            hard_limit=None if hard in (None, 100.0, PACE) else hard,
+                            hard_pace=hard is PACE)
     print(f"{accent('Shared' if row.shared else 'Published (private)')} {row.email}"
           + (f"  swap {row.share_swap_limit:g}" if row.share_swap_limit else "")
-          + (f"  hard {row.share_hard_limit:g}" if row.share_hard_limit else ""))
+          + share_hard_label(row))
+
+
+def share_hard_label(row) -> str:
+    """``"  hard pace"`` / ``"  hard 50"`` / ``""`` for a pool row's hard limit."""
+    if row.share_hard_limit_pace:
+        return "  hard pace" + (f" ≤{row.share_hard_limit:g}" if row.share_hard_limit else "")
+    return f"  hard {row.share_hard_limit:g}" if row.share_hard_limit else ""
 
 
 def _unshare(switcher: ClaudeAccountSwitcher, args) -> None:

@@ -17,7 +17,7 @@ from textual.widgets import ListItem, Static
 from claude_swap import pace
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.models import AccountSnapshot
-from claude_swap.rules import AccountRule
+from claude_swap.rules import AccountRule, resolve_rule, week_progress
 from claude_swap.switcher import ERROR_NOTES
 from claude_swap.usage_store import STALE_OK_S
 from claude_swap.tui import data
@@ -173,9 +173,10 @@ def usage_rows(
     return rows
 
 
-def _over_hard_limit(acc: AccountSnapshot) -> bool:
-    """Whether the account's 5h/7d usage has reached its own hard limit."""
-    rule = acc.rule
+def _over_hard_limit(acc: AccountSnapshot, now: float) -> bool:
+    """Whether the account's 5h/7d usage has reached its own hard limit
+    (a pace-bound one resolved against the week at ``now``)."""
+    rule = resolve_rule(acc.rule, acc.usage.last_good, now)
     if rule.hard_limit >= 100.0:
         return False
     pcts = [
@@ -189,9 +190,15 @@ def _over_hard_limit(acc: AccountSnapshot) -> bool:
     return bool(pcts) and max(pcts) >= rule.hard_limit
 
 
-def rule_chips(rule: AccountRule, threshold: float | None) -> str:
-    """The card/mini header's rule summary (``p2 · hard 50%``), or ``""``."""
-    return rule.summary(threshold)
+def rule_chips(rule: AccountRule, threshold: float | None, progress: float | None = None) -> str:
+    """The card/mini header's rule summary (``p2 · hard 50%``, ``hard pace
+    (61%)``), or ``""``. ``progress`` is the week's progress for a pace-bound
+    rule (``rules.week_progress``), when known."""
+    return rule.summary(threshold, progress)
+
+
+def _progress_for(acc: AccountSnapshot, now: float) -> float | None:
+    return week_progress(acc.usage.last_good, now) if acc.rule.hard_pace else None
 
 
 def account_card_text(
@@ -225,10 +232,10 @@ def account_card_text(
     # it does not, the group moves to its own line, right-aligned, instead
     # of the terminal wrapping it mid-phrase ("⛔ over" / "hard limit").
     meta = Text()
-    chips = rule_chips(acc.rule, threshold)
+    chips = rule_chips(acc.rule, threshold, _progress_for(acc, now))
     if chips:
         meta.append(chips, style=palette.muted)
-    if _over_hard_limit(acc):
+    if _over_hard_limit(acc, now):
         if meta:
             meta.append("   ")
         meta.append("⛔ over hard limit", style=f"bold {palette.sev_crit}")
@@ -276,9 +283,11 @@ def account_card_text(
 
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     # This account's own swap limit (defaulting to the global threshold) is
-    # where its tick goes; a hard limit below 100 gets the second tick.
+    # where its tick goes; a hard limit below 100 gets the second tick — for
+    # a pace-bound one, where the week stands right now.
     tick = acc.rule.swap_for(threshold) if threshold is not None else None
-    hard_limit = acc.rule.hard_limit if acc.rule.hard_limit < 100.0 else None
+    resolved = resolve_rule(acc.rule, acc.usage.last_good, now)
+    hard_limit = resolved.hard_limit if resolved.hard_limit < 100.0 else None
     label_width = max(len(label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
     # everything on a row except the suffix: indent, label, bar, " NNN%", gap
@@ -324,10 +333,10 @@ def mini_account_text(
     text.append(f"  [{acc.display_tag}]", style=palette.muted)
     if acc.disabled:
         text.append("  (disabled)", style=palette.muted)
-    chips = rule_chips(acc.rule, None)
+    chips = rule_chips(acc.rule, None, _progress_for(acc, now))
     if chips:
         text.append(f"  {chips}", style=palette.muted)
-    if _over_hard_limit(acc):
+    if _over_hard_limit(acc, now):
         text.append("  ⛔ hard limit", style=f"bold {palette.sev_crit}")
     text.append("   ")
 

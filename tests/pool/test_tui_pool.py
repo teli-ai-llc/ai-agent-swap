@@ -155,6 +155,28 @@ class TestPoolShareModal:
             await pilot.pause()
             assert results == [PoolShareForm(True, 80.0, 50.0)]
 
+    async def test_pace_hard_limit_round_trips(self, tmp_path):
+        fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
+        app = make_app(fake)
+        async with app.run_test(size=(100, 32)) as pilot:
+            results: list[PoolShareForm | None] = []
+            app.push_screen(
+                PoolShareModal("1", "user1@example.com", None), results.append
+            )
+            await pilot.pause()
+            screen = pilot.app.screen
+            screen.query_one("#swap", Input).value = "80"
+            screen.query_one("#hard", Input).value = "Pace"
+            await pilot.click("#publish")
+            await pilot.pause()
+            assert results == [PoolShareForm(True, 80.0, None, hard_pace=True)]
+            current = PoolShareForm(shared=True, swap_limit=80.0, hard_limit=None, hard_pace=True)
+            app.push_screen(
+                PoolShareModal("1", "user1@example.com", current), lambda _: None
+            )
+            await pilot.pause()
+            assert pilot.app.screen.query_one("#hard", Input).value == "pace"
+
     async def test_escape_dismisses_none(self, tmp_path):
         fake = FakeSwitcher([make_account(1, active=True)], tmp_path)
         app = make_app(fake)
@@ -505,13 +527,14 @@ class TestPoolShareAction:
             client = object()
             session = object()
 
-            def publish_slot(self, num, *, shared, swap_limit, hard_limit):
+            def publish_slot(self, num, *, shared, swap_limit, hard_limit, hard_pace=False):
                 calls.append((num, shared, swap_limit, hard_limit))
                 return SimpleNamespace(
                     shared=shared,
                     email="user1@example.com",
                     share_swap_limit=swap_limit,
                     share_hard_limit=hard_limit,
+                    share_hard_limit_pace=hard_pace,
                 )
 
         monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
@@ -543,7 +566,8 @@ class TestPoolShareAction:
             def get_account(self, session, account_id):
                 assert account_id == "row-1"
                 return SimpleNamespace(
-                    shared=False, share_swap_limit=70.0, share_hard_limit=40.0
+                    shared=False, share_swap_limit=70.0, share_hard_limit=40.0,
+                    share_hard_limit_pace=False,
                 )
 
         class StubSync:

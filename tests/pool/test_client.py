@@ -186,6 +186,27 @@ class TestRest:
         client.set_status(so, row.id, "withdrawn", "11111111-1111-1111-1111-111111111111")
         assert fake_pool.row(row.id)["status"] == "withdrawn"
 
+    def test_pace_sharing_round_trips_and_is_left_alone_when_not_given(self, fake_pool, owner):
+        fake_pool.schema_version = "2"
+        client = _client(fake_pool)
+        so = fake_pool.session_for(owner)
+        row = _publish(client, so, owner)
+        client.update_sharing(so, row.id, shared=True, swap_limit=80.0, hard_limit=None, hard_pace=True)
+        assert fake_pool.row(row.id)["share_hard_limit_pace"] is True
+        assert client.get_account(so, row.id).share_hard_limit_pace is True
+        # hard_pace=None never sends the column: a v1 pool has none
+        client.update_sharing(so, row.id, shared=True, swap_limit=70.0, hard_limit=None)
+        assert fake_pool.row(row.id)["share_hard_limit_pace"] is True
+        client.update_sharing(so, row.id, shared=True, swap_limit=70.0, hard_limit=50.0, hard_pace=False)
+        assert fake_pool.row(row.id)["share_hard_limit_pace"] is False
+
+    def test_a_v1_pool_has_no_pace_column(self, fake_pool, owner):
+        client = _client(fake_pool)
+        so = fake_pool.session_for(owner)
+        row = _publish(client, so, owner)
+        with pytest.raises(PoolError, match="share_hard_limit_pace"):
+            client.update_sharing(so, row.id, shared=True, swap_limit=None, hard_limit=None, hard_pace=True)
+
     def test_expired_jwt_is_auth_error(self, fake_pool, owner):
         client = _client(fake_pool)
         s = fake_pool.session_for(owner)
@@ -200,6 +221,7 @@ class TestRest:
         })
         assert row.organization_uuid == "" and row.credential is None
         assert row.credential_version == 5 and row.share_hard_limit is None
+        assert row.share_hard_limit_pace is False  # a v1 row has no such column
 
 
 def test_older_gotrue_flattens_the_signup_guard_refusal():

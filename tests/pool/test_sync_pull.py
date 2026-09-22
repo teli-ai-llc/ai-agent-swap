@@ -34,6 +34,18 @@ class TestPull:
         assert rule.swap_limit == 80.0 and rule.hard_limit == 50.0 and rule.priority == 2
         assert load_state(s.backup_dir)["pulledAt"] == fake_pool.row(row.id)["updated_at"]
 
+    def test_new_pace_shared_row_lands_with_the_flag(self, sync_env, fake_pool, owner, borrower):
+        fake_pool.schema_version = "2"
+        s, client, _ = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        client.update_sharing(fake_pool.session_for(owner), row.id, shared=True,
+                              swap_limit=None, hard_limit=None, hard_pace=True)
+        PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID).run_pass()
+        record = s._get_sequence_data()["accounts"]["1"]
+        rule = rule_from_record(record)
+        assert (rule.hard_limit, rule.hard_pace, rule.priority) == (100.0, True, 2)
+        assert record["poolShareHardPace"] is True
+
     def test_own_row_lands_as_owned_with_default_rule(self, sync_env, fake_pool, owner):
         s, client, session = sync_env
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
@@ -159,14 +171,69 @@ class TestOwnerLimitChangesReachExistingBorrowers:
     follows it both ways; a borrower's own stricter value survives; anything
     looser than the owner's is pulled back down."""
 
-    def _land(self, sync_env, fake_pool, owner, borrower, *, swap, hard):
+    def _land(self, sync_env, fake_pool, owner, borrower, *, swap, hard, pace=None):
         s, client, _ = sync_env
         self.owner_session = fake_pool.session_for(owner)
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
-        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=swap, hard_limit=hard)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=swap, hard_limit=hard,
+                              hard_pace=pace)
         sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
         assert sync.run_pass().added == ["1"]
         return s, client, sync, row
+
+    def _rotate(self, client, row):
+        """Any row update will do to trigger a re-apply; the owner's machine pushes a rotation."""
+        blob = {"oauthAccount": {"accountUuid": "acct-o", "organizationUuid": "", "emailAddress": "acct-o@x.io"},
+                "claudeAiOauth": {"accessToken": "a-rt-2", "refreshToken": "rt-2", "expiresAt": 2_000}}
+        assert client.push_credential(self.owner_session, row.id, blob, 2_000, "sha256:r2", MID)
+
+    def test_the_owner_moving_to_pace_reaches_a_borrower_and_back(self, sync_env, fake_pool, owner, borrower):
+        fake_pool.schema_version = "2"
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=None,
+                              hard_pace=True)
+        report = sync.run_pass()
+        assert report.errors == [] and report.pulled == []
+        rule = self._rule(s)
+        assert (rule.hard_limit, rule.hard_pace) == (100.0, True)
+        assert s._get_sequence_data()["accounts"]["1"]["poolShareHardPace"] is True
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                              hard_pace=False)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.hard_limit, rule.hard_pace) == (50.0, False)
+
+    def test_a_borrowers_own_number_survives_under_the_owners_pace(self, sync_env, fake_pool, owner, borrower):
+        fake_pool.schema_version = "2"
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        s.set_account_rule("1", hard_limit=30.0, quiet=True)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=None,
+                              hard_pace=True)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.hard_limit, rule.hard_pace) == (30.0, True)   # the stricter of 30 and the week
+
+    def test_a_borrower_cannot_switch_the_owners_pace_off(self, sync_env, fake_pool, owner, borrower):
+        fake_pool.schema_version = "2"
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=None, pace=True)
+        assert self._rule(s).hard_pace is True
+        s.set_account_rule("1", hard_limit=100.0, quiet=True)      # `cswap rule 1 --hard-limit off`
+        assert self._rule(s).hard_pace is False
+        self._rotate(client, row)
+        assert sync.run_pass().pulled == ["1"]
+        assert self._rule(s).hard_pace is True
+
+    def test_a_borrowers_own_pace_survives_while_the_number_follows_the_owner(self, sync_env, fake_pool, owner, borrower):
+        from claude_swap.rules import PACE
+        fake_pool.schema_version = "2"
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        s.set_account_rule("1", hard_limit=PACE, quiet=True)      # `cswap rule 1 --hard-limit pace`
+        assert self._rule(s) == rule_from_record({"swapLimit": 80.0, "hardLimitPace": True, "priority": 2})
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=40.0,
+                              hard_pace=False)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.hard_limit, rule.hard_pace) == (40.0, True)   # the owner's 40, the borrower's pace
 
     @staticmethod
     def _rule(s):
@@ -274,16 +341,44 @@ class TestReconcileOwnerLimit:
         assert reconcile_owner_limit(current, None, new, previous_known=False) == expected
 
 
+class TestReconcileOwnerPace:
+    """The pace flag reconciles like the number: on is the stricter state."""
+
+    @pytest.mark.parametrize("current, previous, new, expected", [
+        (False, False, True, True),   # untouched: the owner turned pace on
+        (True, True, False, False),   # untouched: the owner turned it off
+        (True, False, False, True),   # the borrower's own pace survives
+        (True, False, True, True),
+        (False, True, True, True),    # looser than allowed: pulled back on
+        (False, True, False, False),
+    ])
+    def test_with_a_remembered_previous_value(self, current, previous, new, expected):
+        from claude_swap.pool.sync import reconcile_owner_pace
+        assert reconcile_owner_pace(current, previous, new, previous_known=True) is expected
+
+    @pytest.mark.parametrize("current, new, expected", [
+        (False, True, True),
+        (True, False, True),          # cannot tell an override from the old value: stay strict
+        (False, False, False),
+    ])
+    def test_a_record_landed_before_the_flag_was_remembered(self, current, new, expected):
+        from claude_swap.pool.sync import reconcile_owner_pace
+        assert reconcile_owner_pace(current, None, new, previous_known=False) is expected
+
+
 def test_unlinking_a_slot_forgets_what_the_owner_allowed(sync_env, fake_pool, owner, borrower):
+    fake_pool.schema_version = "2"
     s, client, _ = sync_env
     row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
-    client.update_sharing(fake_pool.session_for(owner), row.id, shared=True, swap_limit=80.0, hard_limit=50.0)
+    client.update_sharing(fake_pool.session_for(owner), row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                          hard_pace=True)
     PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID).run_pass()
     record = s._get_sequence_data()["accounts"]["1"]
     assert record["poolShareSwapLimit"] == 80.0 and record["poolShareHardLimit"] == 50.0
+    assert record["poolShareHardPace"] is True
     s.set_slot_pool_info("1", None, False)
     record = s._get_sequence_data()["accounts"]["1"]
-    assert "poolShareSwapLimit" not in record and "poolShareHardLimit" not in record
+    assert not any(k in record for k in ("poolShareSwapLimit", "poolShareHardLimit", "poolShareHardPace"))
 
 
 class TestConcurrentPassesNeverDuplicateASlot:

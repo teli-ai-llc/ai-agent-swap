@@ -17,6 +17,7 @@ snapshot poller runs store-only: the engine is the only fetcher.
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,7 @@ from claude_swap.autoswitch import (
 )
 from claude_swap.exceptions import ConfigError
 from claude_swap.models import AccountsSnapshot
+from claude_swap.rules import resolve_rule
 from claude_swap.settings import (
     SETTING_SPECS,
     format_setting_value,
@@ -401,7 +403,9 @@ class AutoScreen(Screen):
             if acc.number == active_number or not acc.switchable:
                 continue
             pct = binding_pct(acc.usage.last_good, models)
-            rule = acc.rule
+            # A pace-bound hard limit is the week's progress right now, the
+            # same number the engine decides with this tick.
+            rule = resolve_rule(acc.rule, acc.usage.last_good, time.time())
             entry = Text()
             entry.append(f"\n  {acc.number:>2}  ", style=palette.foreground)
             entry.append(acc.email, style=palette.foreground)

@@ -68,7 +68,9 @@ from claude_swap.rules import (
     apply_rule,
     cap_headroom,
     effective_threshold,
+    resolve_rule,
     rule_from_record,
+    week_progress,
 )
 from claude_swap.printer import (
     abbreviate_path,
@@ -1973,6 +1975,7 @@ class ClaudeAccountSwitcher:
                 # what the owner last allowed (pool/sync.py) means nothing unlinked
                 record.pop("poolShareSwapLimit", None)
                 record.pop("poolShareHardLimit", None)
+                record.pop("poolShareHardPace", None)
             data["lastUpdated"] = get_timestamp()
             self._write_json(self.sequence_file, data)
 
@@ -5332,7 +5335,9 @@ class ClaudeAccountSwitcher:
                 new_usage=rec.usage,
                 is_active=bool(info_by_num[num][4]),
                 # Urgent mode near whichever of the slot's limits comes first.
-                threshold=rules.get(str(num), AccountRule()).leave_at(threshold),
+                threshold=resolve_rule(
+                    rules.get(str(num), AccountRule()), rec.usage, now
+                ).leave_at(threshold),
                 models=models,
                 recent_429=recent_429,
                 now=now,
@@ -5454,8 +5459,13 @@ class ClaudeAccountSwitcher:
         if usage is None:
             usage = self._usage_by_account()
         # Headroom on the capped scale (rules.py): a slot at its hard limit
-        # reads as 0 here, exactly like one at the provider's limit.
-        rules = self.account_rules()
+        # reads as 0 here, exactly like one at the provider's limit. A
+        # pace-bound limit is resolved against this usage first.
+        now = self._usage_store.clock()
+        rules = {
+            num: resolve_rule(rule, usage.get(num), now)
+            for num, rule in self.account_rules().items()
+        }
 
         def rule_of(num: str) -> AccountRule:
             return rules.get(str(num), AccountRule())
@@ -5729,7 +5739,13 @@ class ClaudeAccountSwitcher:
                 print(f"     {line}")
             rule = rule_from_record(seq_data.get("accounts", {}).get(str(num)))
             if not rule.is_default:
-                print(f"     {dimmed('•')} {muted('rule: ' + rule.summary())}")
+                # `hard pace (61%)`: the week's progress from the usage just
+                # printed, so the cap reads as the number it is right now.
+                progress = (
+                    week_progress(entries[str(num)].last_good, self._usage_store.clock())
+                    if rule.hard_pace else None
+                )
+                print(f"     {dimmed('•')} {muted('rule: ' + rule.summary(progress=progress))}")
 
             if show_token_status:
                 for line in self._token_status_lines(accounts_info[i]):
@@ -6279,7 +6295,11 @@ class ClaudeAccountSwitcher:
                 continue
             if strategy == "next-available":
                 raw_headroom = oauth.account_headroom(usage.get(candidate), models)
-                candidate_rule = self.account_rule(candidate)
+                candidate_rule = resolve_rule(
+                    self.account_rule(candidate),
+                    usage.get(candidate),
+                    self._usage_store.clock(),
+                )
                 headroom = cap_headroom(raw_headroom, candidate_rule)
                 if headroom is not None and headroom <= 0:
                     skipped_exhausted.append(candidate)

@@ -495,6 +495,7 @@ class CswapApp(App):
                             shared=row.shared,
                             swap_limit=row.share_swap_limit,
                             hard_limit=row.share_hard_limit,
+                            hard_pace=row.share_hard_limit_pace,
                         )
         except Exception:
             current = None
@@ -514,6 +515,7 @@ class CswapApp(App):
 
         def do_publish() -> None:
             from claude_swap.exceptions import PoolError
+            from claude_swap.pool.cli import share_hard_label
             from claude_swap.pool.sync import build_sync
 
             sync = build_sync(self.switcher)
@@ -524,11 +526,12 @@ class CswapApp(App):
                 shared=form.shared,
                 swap_limit=form.swap_limit,
                 hard_limit=form.hard_limit,
+                hard_pace=form.hard_pace,
             )
             print(
                 f"{'Shared' if row.shared else 'Published (private)'} {row.email}"
                 + (f"  swap {row.share_swap_limit:g}" if row.share_swap_limit else "")
-                + (f"  hard {row.share_hard_limit:g}" if row.share_hard_limit else "")
+                + share_hard_label(row)
             )
 
         self._start_action(f"Publish account {number}", do_publish, show_output=True)
