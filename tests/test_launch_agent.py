@@ -20,6 +20,7 @@ import pytest
 
 from claude_swap import launch_agent
 from claude_swap.exceptions import ClaudeSwitchError
+from tests._symlinks import requires_symlinks
 
 PROGRAM = ["/Users/x/.local/bin/cswap"]
 UID = 501
@@ -117,6 +118,7 @@ def test_resolve_program_prefers_the_console_script(tmp_path):
         assert launch_agent.resolve_program() == [str(script)]
 
 
+@requires_symlinks
 def test_resolve_program_keeps_the_symlink_and_does_not_follow_it(tmp_path):
     """`uv tool install` links ~/.local/bin/cswap into the tool's virtualenv.
 
