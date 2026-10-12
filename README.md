@@ -158,8 +158,8 @@ cswap panel --install-service     # optional, macOS only: live dashboard in the 
 On Windows the service is a per-user startup entry (Task Manager → Startup
 apps shows it as `com.cswap.sync`) running without a window; no admin rights
 needed. Logs are in `%USERPROFILE%\.claude-swap-backup\services\`. Check it
-with `cswap sync --service-status`; after updating the team build, re-run
-`cswap sync --install-service` to restart it on the new code.
+with `cswap sync --service-status`. To update, see
+[Updating the team build](#updating-the-team-build): the sync must be stopped first.
 
 On Linux, run `cswap sync` under systemd or your service manager of choice.
 
@@ -280,8 +280,21 @@ the setting. Run `cswap pool login` again to restore it.
 ```bash
 uv tool install --force git+https://github.com/teli-ai-llc/ai-agent-swap.git
 cswap panel --install-service     # only if you use the panel: rebuilds it for the new version
-cswap sync --install-service      # Windows: restarts the background sync on the new version
 ```
+
+**On Windows, stop the background sync first.** It runs from cswap's install
+folder, and Windows will not delete files a running program has open, so the
+install fails halfway and leaves `cswap` broken. Use these three steps instead:
+
+```powershell
+cswap sync --uninstall-service
+uv tool install --force git+https://github.com/teli-ai-llc/ai-agent-swap.git
+cswap sync --install-service
+```
+
+If an update already failed with `Access is denied`, `cswap` no longer runs, so
+stop the sync from Task Manager (end the `pythonw.exe` running from
+`uv\tools\claude-swap`) and run the last two steps.
 
 ### Leaving the pool
 
