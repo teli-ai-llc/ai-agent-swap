@@ -90,12 +90,13 @@ def _detect_color_support() -> bool:
     # Not a TTY (piped output) -> no color
     if not hasattr(sys.stdout, "isatty") or not sys.stdout.isatty():
         return False
+    # TERM=dumb opts out everywhere; Windows has no TERM by default, but Git
+    # Bash, MSYS and editor-embedded terminals set it.
+    if os.environ.get("TERM", "") == "dumb":
+        return False
     # Windows: try to enable VT processing
     if sys.platform == "win32":
         return _enable_windows_vt()
-    # POSIX: check TERM
-    if os.environ.get("TERM", "") == "dumb":
-        return False
     return True
 
 

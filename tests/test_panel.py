@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import plistlib
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -185,6 +186,7 @@ def test_install_service_runs_the_bundled_binary_with_its_environment(tmp_path, 
     }
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="launchd PATH is built from POSIX paths")
 def test_launch_agent_plist_carries_custom_arguments_and_environment(tmp_path):
     parsed = plistlib.loads(
         launch_agent.build_plist(
