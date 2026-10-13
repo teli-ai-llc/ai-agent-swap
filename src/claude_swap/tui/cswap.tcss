@@ -6,6 +6,76 @@ Screen {
     background: $background;
 }
 
+/* The terminal account browser keeps a fixed-size header and detail area;
+   the roster receives the remaining height, however many accounts exist. */
+#browser-heading {
+    height: 1;
+    margin: 1 3 0 3;
+    color: $primary;
+    text-style: bold;
+}
+
+#browser-summary {
+    height: 2;
+    padding: 0 3;
+    color: $secondary;
+}
+
+#account-scopes {
+    height: 3;
+    padding: 0 3;
+}
+
+#account-scopes Button {
+    height: 3;
+    min-width: 16;
+    width: auto;
+    margin-right: 1;
+}
+
+#account-search {
+    height: 3;
+    margin: 0 3 1 3;
+}
+
+#account-table {
+    height: 1fr;
+    min-height: 3;
+    margin: 0 3;
+    scrollbar-size-vertical: 1;
+}
+
+#account-table > .datatable--cursor,
+#account-table:focus > .datatable--cursor {
+    background: $primary;
+    color: $background;
+    text-style: bold;
+}
+
+#browser-empty {
+    height: auto;
+    padding: 1 3;
+    color: $secondary;
+}
+
+#account-detail-scroll {
+    height: 7;
+    max-height: 30%;
+    padding: 1 3;
+    border-top: solid $panel;
+    scrollbar-size-vertical: 1;
+}
+
+#account-detail {
+    height: auto;
+}
+
+BrowserDashboardScreen #menu {
+    height: 10;
+    max-height: 45%;
+    padding: 0 3;
+}
+
 /* -- accounts panel (the always-visible monitor) --------------------------- */
 
 #accounts-scroll {
@@ -128,9 +198,18 @@ MenuItem Static.menu-item-muted { color: $secondary; }
 
 /* -- modals ----------------------------------------------------------------- */
 
-ConfirmModal, AddTokenModal, OutputModal, RuleModal, PoolLoginModal, PoolShareModal {
+ConfirmModal, AddTokenModal, OutputModal, RuleModal, PoolLoginModal, PoolShareModal, T3SyncModal {
     align: center middle;
     background: $background 60%;
+}
+
+T3SyncModal .modal-box {
+    max-height: 95%;
+    scrollbar-size-vertical: 1;
+}
+
+T3SyncModal Checkbox, T3SyncModal Input {
+    margin-bottom: 1;
 }
 
 .modal-box {

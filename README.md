@@ -73,6 +73,10 @@ how much of it teammates may use.
 
 ### 2. Install
 
+The **0.27.0b2** team build adds a searchable account dashboard with Yours/Shared
+filters, clearer row selection, integrated sharing actions, and optional automatic
+T3 provider sync. T3 provider names use each account's full email address.
+
 Use our build. The `claude-swap` package on PyPI is the public upstream and
 has no pool feature.
 
@@ -436,7 +440,48 @@ Subfolders inherit the nearest mapped ancestor. In an unmapped directory, `cswap
 
 Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usage for every account, switching, and the auto-switcher, all keyboard-driven. Works on macOS, Linux, and Windows.
 
-The dashboard shows every account as a full card — bars, reset times, and per-model rows — with the active one marked (`cswap config set ui.inactiveCards mini` collapses the others to one line). In the auto-switch view, `t` sets the threshold, `m` cycles the per-model limit (off → Fable → all), and `l` goes live; all three are saved, so the view reopens the way you left it. The engine in that view runs only while the view is open — for always-on switching use `cswap auto` or the menu bar.
+The terminal dashboard uses a searchable table, with one row per account and full usage details for the selected row. **Your accounts** includes local accounts and accounts you own in the pool. **Shared accounts** includes accounts available to the team, including your own shared accounts. An account you own can appear in both filters; private accounts synced across your machines remain in **Your accounts**.
+
+Use the arrow keys to select an account, **Enter** or **s** to switch, **/** to search, and **m** for actions on the selected account. Sharing is integrated here: manage sharing on your own accounts, or open **Sharing connection & sync** to connect, view status, sync, or disconnect. Shared accounts belonging to someone else do not offer owner sharing controls. Full reset times and per-model quotas live in the selected account's detail area, so a large roster stays compact. An asterisk beside a table percentage marks cached usage that is due for refresh.
+
+To remove a local account, select it and press **Delete**, or choose **Remove selected account locally** under **m → Actions**, then confirm. A pooled account remains in the pool and can return after a pool update. For an account you own, **Withdraw account from shared pool** removes it from syncing for everyone; you can then remove its local copy. Accounts owned by teammates can only be withdrawn by their owner.
+
+The macOS embedded menu bar panel retains its card/menu layout (`cswap config set ui.inactiveCards mini` collapses its inactive cards). In the auto-switch view, `t` sets the threshold, `m` cycles the per-model limit (off → Fable → all), and `l` goes live; all three are saved, so the view reopens the way you left it. The engine in that view runs only while the view is open — for always-on switching use `cswap auto` or the menu bar.
+
+For a compact CLI roster, use `cswap list --compact`. Add `--scope mine` or `--scope shared` to filter by ownership/sharing, and `--search TEXT` to find an account. These filters also work with `--json`; filtered JSON rows include `ownership` (`mine` / `team`) and `sharing` (`private` / `shared` / `unknown`). The unfiltered JSON contract remains unchanged.
+
+Sharing also has direct commands: `cswap connect`, `cswap sharing`, `cswap share ACCOUNT`, `cswap unshare ACCOUNT`, and `cswap disconnect`. These use the existing pool operations and accept their options; the original `cswap pool …` commands remain available.
+
+### Use cswap accounts in T3
+
+For automatic account discovery, open **Actions → T3 account sync** in the terminal dashboard, or press **i** in the auto-switch view. Enable **Automatically sync all accounts to T3** and save. cswap adds named Claude providers for your own and borrowed accounts, updates their names/profiles, and removes its provider entries when accounts leave your cswap roster. Providers you configured manually are preserved.
+
+The same setting is available from the CLI:
+
+```bash
+cswap t3 enable                    # enable and sync now
+cswap t3 status                    # show settings, provider count and last error
+cswap t3 sync --once               # explicitly sync once
+cswap t3 sync                      # keep syncing in this process; Ctrl-C to stop
+cswap t3 disable                   # stop automatic sync, keep existing providers
+```
+
+Automatic sync runs while the terminal UI, auto-switch engine, menu bar app, or account sync service is running. By default it checks every 60 seconds; `cswap config set t3.intervalSeconds 30` changes that interval. `cswap t3 sync` also provides a standalone watcher. The toggle is off by default, and enabling it performs an immediate pass.
+
+The target is T3's watched `~/.t3/userdata/settings.json` file (or `$T3CODE_HOME/userdata/settings.json`). If T3 uses another data directory, enter its settings path in the modal or run `cswap t3 enable --settings-path /path/to/settings.json`. T3 must have created the file first. Changes are merged and written atomically, with retries for detected concurrent edits. Malformed settings or an unreadable cswap roster stop the pass rather than removing providers. No account tokens are copied into T3's settings.
+
+Provider names use the account's full email address, so its identity stays clear even if you rename its cswap alias. Existing generated names are updated on the next sync, including paused entries. The active default login is labeled **email@example.com · active** and follows `cswap switch`. Other accounts use isolated cswap session profiles. When an account becomes the default login, an existing pinned provider for it is paused; use the entry marked **active** while it is the default. Its pinned provider is re-enabled when it is no longer the default. This avoids preparing a second copy of the active credential. If a profile cannot be prepared, the sync report identifies that account, keeps an existing provider entry paused, and retries on a later pass. API-key profiles are not supported yet. Existing T3 conversations are not deleted when a provider is removed, but they need an available compatible provider to continue.
+
+For manual setup of a single account, choose **Set up this account in T3** from the terminal dashboard's selected-account actions, or run:
+
+```bash
+cswap t3 prepare work
+cswap t3 prepare 2 --json
+```
+
+`prepare` prints the name, binary path, and `CLAUDE_CONFIG_DIR` path to enter when adding a Claude instance in T3 **Settings → Providers**. This individual-account command remains manual; use automatic sync above to register the whole roster. Prepare profiles on the machine where T3 runs Claude. Its JSON output contains setup metadata, never tokens.
+
+The current default Claude login uses T3's default config directory and follows `cswap switch`. To pin that account to a separate T3 provider, switch the default login to another account first, then prepare it again. This avoids making a second live copy of the same login's refresh token. API-key accounts are not supported by cswap session profiles yet. Existing T3 threads cannot move between Claude providers with different config directories; select a prepared provider when creating a new thread.
 
 ### Refresh expired tokens
 

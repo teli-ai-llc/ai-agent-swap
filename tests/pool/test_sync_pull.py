@@ -30,6 +30,7 @@ class TestPull:
         assert _login(s, "1", "acct-o@x.io")["refreshToken"] == "rt-1"
         record = s._get_sequence_data()["accounts"]["1"]
         assert record["email"] == "acct-o@x.io" and record["uuid"] == "acct-o"
+        assert record["poolShared"] is True
         rule = rule_from_record(record)
         assert rule.swap_limit == 80.0 and rule.hard_limit == 50.0 and rule.priority == 2
         assert load_state(s.backup_dir)["pulledAt"] == fake_pool.row(row.id)["updated_at"]
@@ -52,6 +53,18 @@ class TestPull:
         PoolSync(s, client, session, machine_id=MID).run_pass()
         assert s.slot_pool_info("1") == (row.id, True)
         assert rule_from_record(s._get_sequence_data()["accounts"]["1"]).priority == 1
+
+    def test_sharing_change_without_new_credentials_updates_local_visibility(self, sync_env, fake_pool, owner):
+        s, client, session = sync_env
+        row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
+        sync = PoolSync(s, client, session, machine_id=MID)
+        sync.run_pass()
+        client.update_sharing(session, row.id, shared=True, swap_limit=None, hard_limit=None)
+        sync.run_pass()
+        assert s._get_sequence_data()["accounts"]["1"]["poolShared"] is True
+        client.update_sharing(session, row.id, shared=False, swap_limit=None, hard_limit=None)
+        sync.run_pass()
+        assert s._get_sequence_data()["accounts"]["1"]["poolShared"] is False
 
     def test_newer_row_replaces_backup(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env

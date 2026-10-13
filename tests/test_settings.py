@@ -16,6 +16,7 @@ from claude_swap.settings import (
     atomic_write_json,
     AutoSwitchSettings,
     PoolSettings,
+    T3Settings,
     UiSettings,
     effective_settings,
     load_pool_settings,
@@ -213,12 +214,14 @@ class TestSettingSpecs:
         assert by_section["pool"] == {
             f.name for f in PoolSettings.__dataclass_fields__.values()
         }
+        assert by_section["t3"] == {f.name for f in T3Settings.__dataclass_fields__.values()}
 
     def test_defaults_match_dataclass(self):
         sources = {
             "autoswitch": AutoSwitchSettings(),
             "ui": UiSettings(),
             "pool": PoolSettings(),
+            "t3": T3Settings(),
         }
         for spec in SETTING_SPECS.values():
             assert spec.default == getattr(sources[spec.section], spec.field)

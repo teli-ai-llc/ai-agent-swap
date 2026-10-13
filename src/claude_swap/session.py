@@ -529,10 +529,21 @@ def _probe_env(session_dir: Path) -> dict[str, str]:
 class SessionManager:
     """Bootstraps per-account session profiles and launches Claude into them."""
 
-    def __init__(self, switcher: ClaudeAccountSwitcher):
+    def __init__(self, switcher: ClaudeAccountSwitcher, *, quiet: bool = False):
         self.switcher = switcher
         self.sessions_dir = switcher.backup_dir / "sessions"
         self._logger = switcher._logger
+        self._quiet = quiet
+
+    def _notice(self, *args, **kwargs) -> None:
+        if not self._quiet:
+            print(*args, **kwargs)
+
+    def _warning(self, message: str) -> None:
+        if self._quiet:
+            self._logger.warning(message)
+        else:
+            warning(message)
 
     # -- launch ----------------------------------------------------------
 
@@ -574,7 +585,7 @@ class SessionManager:
             # With CLAUDE_CONFIG_DIR set, "current default account" is
             # meaningless (we may already be inside a session terminal), so
             # the same-account fast path below must not trigger.
-            warning(
+            self._warning(
                 f"CLAUDE_CONFIG_DIR is already set ({config_dir_preset}); "
                 "overriding it for this launch."
             )
@@ -594,7 +605,7 @@ class SessionManager:
                         "Switch the default login to another account first, "
                         "or run `claude` directly."
                     )
-                print(
+                self._notice(
                     dimmed(
                         f"Account-{account_num} ({email}) is already the active "
                         "default login — launching claude directly."
@@ -604,7 +615,7 @@ class SessionManager:
 
         scrubbed = [v for v in AUTH_OVERRIDE_ENV_VARS if os.environ.get(v)]
         if scrubbed:
-            warning(
+            self._warning(
                 f"Ignoring {', '.join(scrubbed)} for this session — it would "
                 f"override the selected account inside Claude Code."
             )
@@ -613,7 +624,7 @@ class SessionManager:
             identifier, share, share_history
         )
 
-        print(
+        self._notice(
             f"{accent('Launching')} Account-{account_num} ({email}) "
             f"{muted('[session mode]')}"
         )
@@ -757,7 +768,7 @@ class SessionManager:
                     f"re-add it: cswap --add-account --slot {account_num}"
                 )
             if outcome.error is not None:
-                warning(
+                self._warning(
                     f"Could not refresh the token for Account-{account_num}; "
                     "continuing with the stored credentials."
                 )
@@ -1139,7 +1150,7 @@ class SessionManager:
                 dest.unlink()
             elif dest.exists() and name not in managed:
                 # Pre-existing user data in the profile — never touch it.
-                print(
+                self._notice(
                     dimmed(
                         f"Not sharing {name}: the session profile already has "
                         "its own copy."
@@ -1344,7 +1355,7 @@ class SessionManager:
                 "leaving them in place."
             )
             return False
-        print(
+        self._notice(
             dimmed(
                 "Session MCP servers now mirror your default profile; the "
                 f"profile's previous definitions were saved to {stash.name}."
@@ -1377,7 +1388,7 @@ class SessionManager:
             # Merging moves files out from under any claude still running in
             # this profile, so only migrate when the profile is quiescent.
             if not profile_is_quiescent(session_dir):
-                print(
+                self._notice(
                     dimmed(
                         f"Not sharing {dest.name} yet: another session is "
                         "using this profile — retrying on the next launch."
@@ -1390,14 +1401,14 @@ class SessionManager:
                 self._logger.warning(
                     f"Could not merge {dest.name} into {src}: {e}"
                 )
-                print(
+                self._notice(
                     dimmed(
                         f"Not sharing {dest.name}: merging the profile's "
                         "existing history failed (see log)."
                     )
                 )
                 return False
-            print(
+            self._notice(
                 dimmed(
                     f"Merged the profile's existing {dest.name} into "
                     f"{src} — conversation history is now shared."

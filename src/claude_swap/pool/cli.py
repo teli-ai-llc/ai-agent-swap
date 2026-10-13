@@ -417,11 +417,14 @@ def sync_command(argv: list[str]) -> None:
         sys.exit(1)
 
     def one_pass() -> PassReport | None:
+        from claude_swap.t3_sync import run_auto_sync_quietly
         sync = build_sync(switcher)
         if sync is None:
+            run_auto_sync_quietly(switcher)
             print(dimmed("Not logged in to a pool (or pool.enabled is false). Run: cswap pool login"))
             return None
         report = sync.run_pass()
+        run_auto_sync_quietly(switcher)
         _print_report(report)
         return report
 

@@ -38,6 +38,8 @@ from claude_swap.tui.modals import (
     RuleForm,
     RuleModal,
     TokenForm,
+    T3SyncForm,
+    T3SyncModal,
 )
 from claude_swap.tui.theme import CSWAP_DARK, CSWAP_LIGHT
 
@@ -81,9 +83,11 @@ class CswapApp(App):
         switcher: ClaudeAccountSwitcher,
         *,
         detected: str | None = None,
+        dashboard_type: type[DashboardScreen] | None = None,
     ) -> None:
         super().__init__()
         self.switcher = switcher
+        self._dashboard_type = dashboard_type
         self._detected = detected  # terminal background sensed pre-driver, or None
         self.source = SnapshotSource(switcher)
         self._store_only = False
@@ -123,7 +127,11 @@ class CswapApp(App):
         # We own the theme; $TEXTUAL_THEME is intentionally not honoured.
         self.theme = f"cswap-{resolved}"
         printer.set_theme(resolved)
-        self.push_screen(DashboardScreen())
+        from claude_swap.tui.browser import BrowserDashboardScreen
+        dashboard = self._dashboard_type or (
+            DashboardScreen if self.max_account_cards else BrowserDashboardScreen
+        )
+        self.push_screen(dashboard())
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
         self.set_interval(1.0, self._update_refresh_status)
         self._tick()
@@ -323,6 +331,44 @@ class CswapApp(App):
 
     # -- account operations ----------------------------------------------------
 
+    def action_t3_settings(self) -> None:
+        from claude_swap.settings import load_t3_settings
+        from claude_swap.t3_sync import status
+        settings = load_t3_settings(self.switcher.backup_dir)
+        state = status(self.switcher)
+        summary = f"Managed providers: {state.get('managedCount', 0)}"
+        if state.get("lastError"):
+            summary += f"\nLast sync error: {state['lastError']}"
+        elif state.get("errors"):
+            summary += f"\n{state['errors'][0]}"
+        self.push_screen(T3SyncModal(settings.auto_sync, settings.settings_path, summary), self._on_t3_form)
+
+    def _on_t3_form(self, form: T3SyncForm | None) -> None:
+        if form is None:
+            return
+
+        def save():
+            from claude_swap.settings import unset_setting
+            from claude_swap.t3_sync import describe_report, sync_once
+            if form.settings_path:
+                set_setting(self.switcher.backup_dir, "t3.settingsPath", form.settings_path)
+            else:
+                unset_setting(self.switcher.backup_dir, "t3.settingsPath")
+            set_setting(self.switcher.backup_dir, "t3.autoSync", str(form.enabled).lower())
+            if form.enabled:
+                print(describe_report(sync_once(self.switcher, force=True)))
+            else:
+                print("Automatic T3 sync is off. Existing providers were kept.")
+
+        self._start_action("T3 account sync", save, show_output=True)
+
+    def prepare_t3_account(self, number: str) -> None:
+        def prepare():
+            from claude_swap.t3 import prepare_provider, provider_setup_text
+            print(provider_setup_text(prepare_provider(self.switcher, number)))
+
+        self._start_action("Set up account in T3", prepare, show_output=True)
+
     def do_switch(self, number: str) -> None:
         self._start_action(
             f"Switch to account {number}",
@@ -352,10 +398,19 @@ class CswapApp(App):
         )
 
     def confirm_remove(self, number: str, email: str) -> None:
+        account = next((a for a in (self.snapshot.accounts if self.snapshot else ())
+                        if a.number == number), None)
+        message = (f"Remove account {number} ({email})?\n\n"
+                   "Its stored credentials and config backup are deleted from this machine.")
+        if account and account.pool_account_id:
+            message += "\n\nIt remains in the shared pool and may return when the pool updates."
+            if account.is_mine:
+                message += " Withdraw it from the shared pool first to remove it from syncing."
+            else:
+                message += " Only its owner can withdraw it from the shared pool."
         self.push_screen(
             ConfirmModal(
-                f"Remove account {number} ({email})?\n\n"
-                "Its stored credentials and config backup are deleted.",
+                message,
                 title="Remove account",
                 yes_label="Remove",
             ),

@@ -20,6 +20,52 @@ from claude_swap.rules import (
 )
 
 
+@dataclass(frozen=True)
+class T3SyncForm:
+    enabled: bool
+    settings_path: str | None
+
+
+class T3SyncModal(ModalScreen[T3SyncForm | None]):
+    BINDINGS = [Binding("escape", "cancel", "Cancel", show=False)]
+
+    def __init__(self, enabled: bool, configured_path: str | None, summary: str):
+        super().__init__()
+        self._enabled = enabled
+        self._path = configured_path
+        self._summary = summary
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(classes="modal-box"):
+            yield Label("T3 account sync", classes="modal-title")
+            yield Static(
+                "Show your cswap accounts as Claude providers in T3.\n"
+                "New accounts are added automatically; removed accounts disappear. "
+                "Only providers created by cswap are managed.\n\n"
+                "The default login appears as ‘cswap active’; other accounts "
+                "use separate profiles. API-key accounts are not supported yet.",
+                classes="modal-body", markup=False,
+            )
+            yield Static(self._summary, classes="modal-body", markup=False)
+            yield Checkbox("Automatically sync all accounts to T3", value=self._enabled, id="t3-enabled")
+            yield Input(value=self._path or "", placeholder="T3 settings.json path (blank = auto-detect)", id="t3-path")
+            yield Static("Runs while cswap's UI or a sync service is running. Turning it off keeps existing providers.",
+                         classes="modal-body", markup=False)
+            with Horizontal(classes="modal-buttons"):
+                yield Button("Save", id="t3-save")
+                yield Button("Cancel", id="t3-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "t3-cancel":
+            self.dismiss(None)
+        elif event.button.id == "t3-save":
+            self.dismiss(T3SyncForm(self.query_one("#t3-enabled", Checkbox).value,
+                                    self.query_one("#t3-path", Input).value.strip() or None))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ConfirmModal(ModalScreen[bool]):
     """Yes/No confirmation. Dismisses with True only on explicit confirm.
 

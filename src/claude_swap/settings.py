@@ -102,7 +102,14 @@ class PoolSettings:
     enabled: bool = True
 
 
-_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings, "pool": PoolSettings}
+@dataclass(frozen=True)
+class T3Settings:
+    auto_sync: bool = False
+    settings_path: str | None = None
+    interval_seconds: float = 60.0
+
+
+_SECTION_DEFAULT_SOURCES = {"autoswitch": AutoSwitchSettings, "ui": UiSettings, "pool": PoolSettings, "t3": T3Settings}
 
 
 @dataclass(frozen=True)
@@ -202,6 +209,12 @@ SETTING_SPECS: dict[str, SettingSpec] = {
             "pool", "enabled", "enabled", "bool",
             help="Team pool: run sync passes (false pauses the pool without logging out)",
         ),
+        SettingSpec("t3", "autoSync", "auto_sync", "bool",
+                    help="Automatically add/remove cswap accounts in T3's provider list"),
+        SettingSpec("t3", "settingsPath", "settings_path", "string",
+                    help="T3 settings.json path (default: T3CODE_HOME/userdata/settings.json or ~/.t3/userdata/settings.json)"),
+        SettingSpec("t3", "intervalSeconds", "interval_seconds", "float", 10.0, 3600.0,
+                    help="Seconds between automatic T3 account sync passes"),
     )
 }
 
@@ -362,6 +375,21 @@ def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
     atomic_write_json(path, raw)
 
 
+def load_t3_settings(backup_root: Path) -> T3Settings:
+    section = _read_raw(settings_path(backup_root)).get("t3")
+    if not isinstance(section, dict):
+        return T3Settings()
+    enabled = section.get("autoSync")
+    target = section.get("settingsPath")
+    interval = section.get("intervalSeconds")
+    return T3Settings(
+        auto_sync=enabled if isinstance(enabled, bool) else False,
+        settings_path=target.strip() if isinstance(target, str) and target.strip() else None,
+        interval_seconds=float(min(3600, max(10, interval)))
+        if isinstance(interval, (int, float)) and not isinstance(interval, bool) else 60.0,
+    )
+
+
 def setting_spec(dotted_key: str) -> SettingSpec:
     """Look up a spec by dotted key; unknown keys raise with the valid list."""
     spec = SETTING_SPECS.get(dotted_key)
@@ -513,6 +541,7 @@ def effective_settings(backup_root: Path) -> list[tuple[SettingSpec, object, boo
         "autoswitch": load_settings(backup_root),
         "ui": load_ui_settings(backup_root),
         "pool": load_pool_settings(backup_root),
+        "t3": load_t3_settings(backup_root),
     }
     rows = []
     for spec in SETTING_SPECS.values():
