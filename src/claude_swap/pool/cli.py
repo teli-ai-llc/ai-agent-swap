@@ -400,7 +400,7 @@ def sync_command(argv: list[str]) -> None:
                     "Runs forever unless --once.",
     )
     parser.add_argument("--once", action="store_true", help="One pass, then exit (0 ok, 1 skipped, 2 errors)")
-    parser.add_argument("--install-service", action="store_true", help="macOS: run at login via launchd")
+    parser.add_argument("--install-service", action="store_true", help="macOS/Windows: run at login in the background")
     parser.add_argument("--uninstall-service", action="store_true")
     parser.add_argument("--service-status", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -456,8 +456,11 @@ def sync_command(argv: list[str]) -> None:
 
 
 def _sync_service(args) -> None:
+    if sys.platform == "win32":
+        _sync_service_windows(args)
+        return
     if sys.platform != "darwin":
-        print_error("The sync service is only available on macOS. Elsewhere run `cswap sync` under your service manager.")
+        print_error("The sync service is only available on macOS and Windows. Elsewhere run `cswap sync` under your service manager.")
         sys.exit(1)
     from claude_swap import launch_agent
     try:
@@ -474,5 +477,24 @@ def _sync_service(args) -> None:
         print(json.dumps(status, indent=2))
         sys.exit(0)
     except ClaudeSwitchError as e:
+        print_error(str(e))
+        sys.exit(1)
+
+
+def _sync_service_windows(args) -> None:
+    from claude_swap import windows_startup
+    try:
+        if args.install_service:
+            result = windows_startup.install(SYNC_LABEL, ("sync",))
+            print(f"{accent('Installed')} {SYNC_LABEL} ({result['registry']})")
+            print(dimmed(f"  Logs: {result['stdout_log']} and .err"))
+            sys.exit(0)
+        if args.uninstall_service:
+            windows_startup.uninstall(SYNC_LABEL)
+            print(f"{accent('Removed')} {SYNC_LABEL}")
+            sys.exit(0)
+        print(json.dumps(windows_startup.status(SYNC_LABEL), indent=2))
+        sys.exit(0)
+    except (ClaudeSwitchError, OSError) as e:
         print_error(str(e))
         sys.exit(1)

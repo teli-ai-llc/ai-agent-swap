@@ -63,12 +63,13 @@ teammate's spare capacity automatically, and moves you back when yours resets.
 You stay in control of your own login: you decide whether it is shared and
 how much of it teammates may use.
 
-**Time needed:** about 5 minutes. **Works on:** macOS and Linux.
+**Time needed:** about 5 minutes. **Works on:** macOS, Windows and Linux.
 
 ### 1. Before you start
 
 - Claude Code is installed and you are signed in with **your own** account.
 - `uv` is installed. If not: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+  (Windows: `winget install astral-sh.uv`, then open a new terminal).
 - You have the pool URL, the anon key and the pool code from Austin.
 
 ### 2. Install
@@ -154,9 +155,15 @@ Have more than one Claude account? Sign in to Claude Code with each
 Claude logins rotate their tokens. Syncing is what keeps everyone's copy alive.
 
 ```bash
-cswap sync --install-service      # macOS: runs at login, syncs every 30 s
-cswap panel --install-service     # optional: live dashboard in the menu bar ("CS")
+cswap sync --install-service      # macOS and Windows: runs at login, syncs every 30 s
+cswap panel --install-service     # optional, macOS only: live dashboard in the menu bar ("CS")
 ```
+
+On Windows the service is a per-user startup entry (Task Manager → Startup
+apps shows it as `com.cswap.sync`) running without a window; no admin rights
+needed. Logs are in `%USERPROFILE%\.claude-swap-backup\services\`. Check it
+with `cswap sync --service-status`. To update, see
+[Updating the team build](#updating-the-team-build): the sync must be stopped first.
 
 On Linux, run `cswap sync` under systemd or your service manager of choice.
 
@@ -278,6 +285,20 @@ the setting. Run `cswap pool login` again to restore it.
 uv tool install --force git+https://github.com/teli-ai-llc/ai-agent-swap.git
 cswap panel --install-service     # only if you use the panel: rebuilds it for the new version
 ```
+
+**On Windows, stop the background sync first.** It runs from cswap's install
+folder, and Windows will not delete files a running program has open, so the
+install fails halfway and leaves `cswap` broken. Use these three steps instead:
+
+```powershell
+cswap sync --uninstall-service
+uv tool install --force git+https://github.com/teli-ai-llc/ai-agent-swap.git
+cswap sync --install-service
+```
+
+If an update already failed with `Access is denied`, `cswap` no longer runs, so
+stop the sync from Task Manager (end the `pythonw.exe` running from
+`uv\tools\claude-swap`) and run the last two steps.
 
 ### Leaving the pool
 
@@ -667,7 +688,7 @@ cswap pool share 2 --swap-limit 80 --hard-limit      # what borrowers may use of
 cswap pool share 2 --swap-limit 80 --hard-limit 50   # ... or a fixed 50%
 cswap pool unshare 2                 # withdraw it
 cswap pool status                    # who you are, what is linked, what needs attention
-cswap sync --install-service         # macOS: keep syncing at login (else: cswap sync, or cswap auto / the TUI)
+cswap sync --install-service         # macOS/Windows: keep syncing at login (else: cswap sync, or cswap auto / the TUI)
 cswap pool logout                    # drops the session and the borrowed accounts
 ```
 
