@@ -36,6 +36,12 @@ def _switcher():
     return s
 
 
+def _saved_session(switcher, session):
+    """Model signing into a test machine as this member before syncing."""
+    save_session(switcher.backup_dir, session)
+    return session
+
+
 def _creds(rt: str, exp: int) -> str:
     return json.dumps({"claudeAiOauth": {"accessToken": f"a-{rt}", "refreshToken": rt, "expiresAt": exp}})
 

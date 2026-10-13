@@ -185,7 +185,9 @@ def sync_once(switcher, *, force: bool = False, now: float | None = None, prepar
             current = switcher._get_current_account()
             owner = owner_key(switcher.backup_dir)
             launcher = SessionManager(switcher, quiet=True)
-            prepare = prepare or (lambda num: launcher.setup_session(num, share=True)[0])
+            prepare = prepare or (
+                lambda num: launcher.setup_session(num, share=True, refresh=False)[0]
+            )
             desired: dict[str, dict | None] = {}
             names: dict[str, str] = {}
             errors = []

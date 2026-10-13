@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from claude_swap.pool.sync import PoolSync, load_state
-from tests.pool.conftest import _mark_dead, _publish_row, _seed
+from tests.pool.conftest import _saved_session, _mark_dead, _publish_row, _seed
 
 MID = "11111111-1111-1111-1111-111111111111"
 
@@ -13,7 +13,7 @@ MID = "11111111-1111-1111-1111-111111111111"
 class TestStatus:
     def test_dead_slot_with_no_newer_server_copy_is_flagged_once(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         _mark_dead(s, "3", "acct-o@x.io")
@@ -28,7 +28,7 @@ class TestStatus:
 
     def test_dead_slot_heals_from_a_newer_server_copy(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         _mark_dead(s, "3", "acct-o@x.io")

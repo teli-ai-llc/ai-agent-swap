@@ -350,6 +350,20 @@ class TestResolveAccount:
 
 
 class TestBootstrap:
+    def test_discovery_bootstrap_and_pool_update_never_refresh(
+        self, manager, seeded_switcher, auth_status_tracks_seed, refresh_rotates
+    ):
+        session_dir, _, _ = manager.setup_session("2", share=False, refresh=False)
+        assert (session_dir / ".credentials.json").read_text() == CREDS
+        # A pool pull invalidates the profile. Discovery must seed the pulled
+        # successor without consuming it, including on repeated sync passes.
+        seeded_switcher._write_account_credentials(ACCOUNT_NUM, ACCOUNT_EMAIL, ROTATED_CREDS)
+        manager.setup_session("2", share=False, refresh=False)
+        manager.setup_session("2", share=False, refresh=False)
+        assert (session_dir / ".credentials.json").read_text() == ROTATED_CREDS
+        assert seeded_switcher.read_account_credentials(ACCOUNT_NUM, ACCOUNT_EMAIL) == ROTATED_CREDS
+        assert refresh_rotates == []
+
     def test_happy_path(
         self, manager, seeded_switcher, auth_status_tracks_seed, refresh_rotates
     ):

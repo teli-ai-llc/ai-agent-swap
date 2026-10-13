@@ -21,7 +21,7 @@ def test_preparation_reuses_session_lifecycle(monkeypatch):
     launcher.setup_session.return_value = (Path("/profiles/work"), "2", "work@example.com")
     monkeypatch.setattr(t3, "SessionManager", lambda _: launcher)
     result = t3.prepare_provider(switcher(), "work")
-    launcher.setup_session.assert_called_once_with("work", share=True)
+    launcher.setup_session.assert_called_once_with("work", share=True, refresh=False)
     assert result["configDir"] == str(Path("/profiles/work"))
     assert result["accountPinned"] is True
     assert result["displayName"] == "work@example.com"

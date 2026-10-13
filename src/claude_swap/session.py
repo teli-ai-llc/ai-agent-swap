@@ -685,9 +685,14 @@ class SessionManager:
     # -- bootstrap -------------------------------------------------------
 
     def setup_session(
-        self, identifier: str, share: bool, share_history: bool = False
+        self, identifier: str, share: bool, share_history: bool = False,
+        *, refresh: bool = True,
     ) -> tuple[Path, str, str]:
-        """Ensure a valid session profile exists; returns (dir, num, email)."""
+        """Ensure a session profile exists; optionally refresh before bootstrap.
+
+        Discovery integrations must use refresh=False: registering an account
+        is not a reason to rotate a refresh grant shared with other machines.
+        """
         account_num, email, org_uuid = self.switcher.resolve_account(identifier)
         # Defense-in-depth: also guard here (run() guards before its fast path).
         self._ensure_not_api_key(account_num, email)
@@ -714,7 +719,10 @@ class SessionManager:
         # valid, and claude refreshes on its own at runtime. Setup-token
         # accounts (--add-token) have no refresh token by design — skip
         # silently instead of warning about a flow that can't happen.
-        pre_creds = self.switcher.read_account_credentials(account_num, email)
+        pre_creds = (
+            self.switcher.read_account_credentials(account_num, email)
+            if refresh else None
+        )
         if pre_creds and self._has_refresh_token(pre_creds):
             outcome = self.switcher.consume_backup_grant(
                 account_num, email, pre_creds
