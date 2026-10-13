@@ -240,8 +240,11 @@ class BlockingSnapshotSwitcher(FakeSwitcher):
 
 def make_app(fake: FakeSwitcher):
     from claude_swap.tui.app import CswapApp
+    from claude_swap.tui.dashboard import DashboardScreen
 
-    return CswapApp(fake)
+    # These tests exercise the card/menu interface retained by the macOS
+    # panel. The default terminal browser has its own integration tests.
+    return CswapApp(fake, dashboard_type=DashboardScreen)
 
 
 async def settle(pilot) -> None:

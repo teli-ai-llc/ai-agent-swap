@@ -81,6 +81,7 @@ class AutoScreen(Screen):
         Binding("l", "toggle_live", "Go live / dry-run"),
         Binding("t", "adjust_threshold", "Threshold"),
         Binding("m", "cycle_model", "Model limit"),
+        Binding("i", "app.t3_settings", "T3 sync"),
         Binding("left", "threshold_step(-1)", "-1%"),
         Binding("right", "threshold_step(1)", "+1%"),
         Binding("enter", "adjust_done", "Done"),

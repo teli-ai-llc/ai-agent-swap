@@ -332,6 +332,8 @@ class PoolSync:
             return
 
         record = data["accounts"][num]
+        if record.get("poolShared") != row.shared:
+            self.switcher.set_slot_pool_info(num, row.id, mine, shared=row.shared)
         if not mine:
             # Independent of the credential: `cswap pool share` moves only the
             # limits, and the row's updated_at still brings it here.
@@ -429,6 +431,7 @@ class PoolSync:
                 "email": row.email, "uuid": row.account_uuid,
                 "organizationUuid": row.organization_uuid, "organizationName": row.organization_name,
                 "added": get_timestamp(), "poolAccountId": row.id, "poolOwned": mine,
+                "poolShared": row.shared,
             }
             if not mine:
                 apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
@@ -548,7 +551,7 @@ class PoolSync:
             self.client.push_credential(self.session, row.id, blob, blob_version(blob),
                                         blob_fingerprint(blob), self.machine_id)
             row = self.client.get_account(self.session, row.id) or row
-        self.switcher.set_slot_pool_info(num, row.id, True)
+        self.switcher.set_slot_pool_info(num, row.id, True, shared=shared)
         state = load_state(self.switcher.backup_dir)
         state["pushed"][num] = credential_fingerprint(creds_text) or ""
         save_state(self.switcher.backup_dir, state)
@@ -595,6 +598,15 @@ _last_quiet_warning: dict[str, float] = {}
 
 
 def run_pass_quietly(switcher, *, force: bool = False) -> PassReport | None:
+    try:
+        return _run_pool_pass_quietly(switcher, force=force)
+    finally:
+        # The integration also runs for local-only accounts, without a pool.
+        from claude_swap.t3_sync import run_auto_sync_quietly
+        run_auto_sync_quietly(switcher, force=force)
+
+
+def _run_pool_pass_quietly(switcher, *, force: bool = False) -> PassReport | None:
     """One pass for poll surfaces: never raises, paced by pool.pollIntervalSeconds.
 
     Returns None when there is no pool on this machine or the pace says wait.

@@ -142,6 +142,19 @@ class AccountSnapshot:
     alias: str = ""
     disabled: bool = False  # held out of auto-rotation (still a valid explicit target)
     rule: AccountRule = AccountRule()  # swap limit / hard limit / priority
+    pool_account_id: str | None = None
+    pool_owned: bool = False
+    pool_shared: bool | None = None  # unknown until the next pool sync
+
+    @property
+    def is_mine(self) -> bool:
+        return not self.pool_account_id or self.pool_owned
+
+    @property
+    def is_shared(self) -> bool:
+        return bool(self.pool_account_id) and (
+            not self.pool_owned or self.pool_shared is True
+        )
 
     @property
     def display_tag(self) -> str:

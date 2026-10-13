@@ -1786,6 +1786,9 @@ class ClaudeAccountSwitcher:
                     alias=alias,
                     disabled=self._disabled_from_data(seq_data, n),
                     rule=rule_from_record(seq_data.get("accounts", {}).get(n)),
+                    pool_account_id=seq_data.get("accounts", {}).get(n, {}).get("poolAccountId"),
+                    pool_owned=bool(seq_data.get("accounts", {}).get(n, {}).get("poolOwned")),
+                    pool_shared=seq_data.get("accounts", {}).get(n, {}).get("poolShared"),
                 )
             )
         return AccountsSnapshot(
@@ -1959,7 +1962,7 @@ class ClaudeAccountSwitcher:
             return None, False
         return account_id, bool(record.get("poolOwned"))
 
-    def set_slot_pool_info(self, num: str, account_id: str | None, owned: bool) -> None:
+    def set_slot_pool_info(self, num: str, account_id: str | None, owned: bool, *, shared: bool | None = None) -> None:
         """Link (or unlink, with ``account_id=None``) a slot to a pool row."""
         with FileLock(self.lock_file):
             data = self._get_sequence_data() or {}
@@ -1969,9 +1972,12 @@ class ClaudeAccountSwitcher:
             if account_id:
                 record["poolAccountId"] = account_id
                 record["poolOwned"] = bool(owned)
+                if shared is not None:
+                    record["poolShared"] = shared
             else:
                 record.pop("poolAccountId", None)
                 record.pop("poolOwned", None)
+                record.pop("poolShared", None)
                 # what the owner last allowed (pool/sync.py) means nothing unlinked
                 record.pop("poolShareSwapLimit", None)
                 record.pop("poolShareHardLimit", None)
@@ -3829,7 +3835,7 @@ class ClaudeAccountSwitcher:
         data = self._get_sequence_data()
         prior_pool = (data.get("accounts", {}).get(account_num) or {})
         carried_pool = {
-            k: prior_pool[k] for k in ("poolAccountId", "poolOwned") if k in prior_pool
+            k: prior_pool[k] for k in ("poolAccountId", "poolOwned", "poolShared") if k in prior_pool
         } if prior_pool.get("email") == current_email else {}
         data["accounts"][account_num] = {
             "email": current_email,

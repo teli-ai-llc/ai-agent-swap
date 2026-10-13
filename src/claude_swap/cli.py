@@ -1233,6 +1233,10 @@ def main() -> None:
     if argv and argv[0] == "run":
         _run_command(argv[1:])
         return  # only reachable in tests where exec/exit is mocked
+    if argv and argv[0] == "t3":
+        from claude_swap.t3 import command
+        command(argv[1:], prog=f"{_prog_name()} t3")
+        return
     if argv and argv[0] == "auto":
         _auto_command(argv[1:])
         return  # only reachable in tests where sys.exit is mocked
@@ -1259,6 +1263,12 @@ def main() -> None:
         return
     if argv and argv[0] == "move":
         _move_command(argv[1:])
+        return
+    sharing_commands = {"connect": "login", "disconnect": "logout", "share": "share",
+                        "unshare": "unshare", "sharing": "status"}
+    if argv and argv[0] in sharing_commands:
+        from claude_swap.pool.cli import pool_command
+        pool_command([sharing_commands[argv[0]], *argv[1:]])
         return
     if argv and argv[0] == "pool":
         from claude_swap.pool.cli import pool_command
@@ -1310,14 +1320,19 @@ Commands:
   %(prog)s move <a> <slot>            assign an account to a slot (swaps if taken)
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
-  %(prog)s pool login|logout|status   team pool: sign in, sign out, what is linked
-  %(prog)s pool share <num|email>     publish an account to the pool (owner sets limits)
-  %(prog)s pool unshare <num|email>   withdraw an account from the pool
+  %(prog)s connect                    connect your shared accounts
+  %(prog)s disconnect                 disconnect account sharing
+  %(prog)s sharing                    show account-sharing connection status
+  %(prog)s share <num|email>          manage an account's sharing and limits
+  %(prog)s unshare <num|email>        withdraw an account from syncing
   %(prog)s sync [--once]              push/pull pool logins (also --install-service on macOS)
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
   %(prog)s tui                        interactive dashboard (also: bare %(prog)s)
+  %(prog)s t3 prepare <num|email>     prepare an account profile for T3
+  %(prog)s t3 enable|disable|status  configure automatic T3 account sync
+  %(prog)s t3 sync [--once]          sync cswap accounts into T3 providers
   %(prog)s menubar                    macOS menu bar app
   %(prog)s menubar --install-service  keep the menu bar running via launchd
   %(prog)s panel                      macOS menu bar drop-down with the live dashboard
@@ -1344,6 +1359,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     )
 
     # Version and debug flags (outside mutually exclusive group)
+    parser.add_argument("--compact", action="store_true", help="With list: one row per account")
+    parser.add_argument("--scope", choices=["all", "mine", "shared"], help="With list: filter account ownership / sharing")
+    parser.add_argument("--search", help="With list: search account name, email or organization")
     parser.add_argument(
         "--version",
         action="version",
@@ -1576,6 +1594,12 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
     if args.token_status and not args.list:
         parser.error("--token-status can only be used with 'list'")
 
+    catalog_requested = args.compact or args.scope is not None or args.search is not None
+    if catalog_requested and not args.list:
+        parser.error("--compact, --scope and --search can only be used with 'list'")
+    if catalog_requested and args.token_status:
+        parser.error("Use 'list --token-status' without compact listing filters for token diagnostics")
+
     if args.json and not (args.list or args.status or args.switch or args.switch_to):
         parser.error("--json can only be used with 'list', 'status', or 'switch'")
 
@@ -1669,8 +1693,17 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
         elif args.list:
             payload = switcher.list_accounts(
                 show_token_status=args.token_status,
-                json_output=args.json,
+                json_output=args.json or catalog_requested,
             )
+            if catalog_requested and payload is not None:
+                from claude_swap.account_catalog import account_catalog, print_catalog
+                payload = account_catalog(
+                    payload, (switcher._get_sequence_data() or {}).get("accounts", {}),
+                    scope=args.scope or "all", search=args.search or "",
+                )
+                if not args.json:
+                    print_catalog(payload)
+                    payload = None
             from claude_swap.pool.sync import attention_lines, load_state
             if args.json and payload is not None:
                 payload["poolAttention"] = load_state(switcher.backup_dir).get("attention", [])
@@ -1758,6 +1791,10 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
 
     if args.json and payload is not None:
         print(json.dumps(payload, indent=2))
+
+    if not args.purge and not args.upgrade:
+        from claude_swap.t3_sync import run_auto_sync_quietly
+        run_auto_sync_quietly(switcher, force=True)
 
     # Passive update notification (never fails). Skipped after --purge so we
     # don't immediately recreate <backup_root>/cache/update_check.json inside
