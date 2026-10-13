@@ -22,7 +22,7 @@ def test_preparation_reuses_session_lifecycle(monkeypatch):
     monkeypatch.setattr(t3, "SessionManager", lambda _: launcher)
     result = t3.prepare_provider(switcher(), "work")
     launcher.setup_session.assert_called_once_with("work", share=True)
-    assert result["configDir"] == "/profiles/work"
+    assert result["configDir"] == str(Path("/profiles/work"))
     assert result["accountPinned"] is True
     assert result["displayName"] == "work@example.com"
     assert "tokens" not in json.dumps(result)
