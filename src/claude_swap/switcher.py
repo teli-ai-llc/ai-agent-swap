@@ -25,7 +25,7 @@ from claude_swap.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_swap import oauth, pace
+from claude_swap import oauth, pace, recommend
 from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
 from claude_swap.json_output import (
     SCHEMA_VERSION,
@@ -1846,6 +1846,33 @@ class ClaudeAccountSwitcher:
         inputs = (loaded.threshold, parse_model_names(loaded.model))
         self._poll_inputs_cache = (mtime, inputs)
         return inputs
+
+    def routing_strategy(self) -> str:
+        """The configured auto-switch strategy (``best`` when unreadable)."""
+        try:
+            return load_settings(self.backup_dir).strategy
+        except Exception:  # noqa: BLE001 - display/ranking must never fail here
+            return "best"
+
+    def recommendation(
+        self, usage: dict[str, dict | str | None] | None = None
+    ) -> list[tuple[str, recommend.Outlook]]:
+        """Every switchable account ranked best-pick first (recommend.py),
+        on each slot's own capped scale and the configured models. Pure
+        read: uses the stored usage unless ``usage`` is given."""
+        if usage is None:
+            usage = self._usage_by_account()
+        _, models = self._poll_policy_inputs()
+        now = self._usage_store.clock()
+        rules = {
+            num: resolve_rule(rule, usage.get(num), now)
+            for num, rule in self.account_rules().items()
+        }
+        accounts = {
+            num: (usage.get(num), rules.get(num))
+            for num in self.switchable_account_numbers()
+        }
+        return recommend.rank(accounts, models, now)
 
     def switchable_account_numbers(self) -> list[str]:
         """Account numbers in rotation order eligible for automatic selection.
@@ -5484,6 +5511,21 @@ class ClaudeAccountSwitcher:
             # Can't measure where the user is → can't prove any target is
             # better. Stay rather than risk moving onto a worse account.
             return None, "current-unavailable"
+
+        if self.routing_strategy() == "smart":
+            # The same pick every surface shows (recommend.py): the most
+            # perishable usable quota. Nothing usable falls through to the
+            # headroom logic below, which tells exhausted from unknown.
+            pick = recommend.best(
+                {
+                    num: (usage.get(num), rule_of(num))
+                    for num in [*others, str(current_num)]
+                },
+                models,
+                now,
+            )
+            if pick is not None:
+                return (None, "stay") if pick[0] == str(current_num) else (pick[0], "")
 
         scored = [
             (cap_headroom(oauth.account_headroom(usage.get(num), models), rule_of(num)), num)

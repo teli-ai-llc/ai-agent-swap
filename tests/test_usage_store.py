@@ -167,6 +167,18 @@ class TestExtendedTrust:
         assert entry.consecutive_failures == 2
         assert entry.decision_value() is None
 
+    def test_non_429_failure_is_not_trusted_past_a_window_reset(self, store, clock):
+        # A timeout keeps last_good trusted for up to TRUST_MAX_AGE_S, but not
+        # past its own soonest reset: by then that window is back at 0% and
+        # the old pct would skip a just-refilled account.
+        usage = self._usage_resetting_at(clock, 600)
+        store.record({"1": FetchRecord(usage=usage)}, IDENT)
+        store.record({"1": FetchRecord(error="timeout")}, IDENT)
+        clock.advance(300)
+        assert store.entries(IDENT)["1"].decision_value() == usage
+        clock.advance(400)  # the window has reset
+        assert store.entries(IDENT)["1"].decision_value() is None
+
     def _usage_resetting_at(self, clock, seconds_ahead):
         from datetime import datetime, timezone
 

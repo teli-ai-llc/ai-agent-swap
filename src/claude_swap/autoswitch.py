@@ -42,7 +42,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import ClassVar
 
-from claude_swap import oauth, poll_policy
+from claude_swap import oauth, poll_policy, recommend
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.json_output import SCHEMA_VERSION, USAGE_TOKEN_EXPIRED
 from claude_swap.locking import FileLock
@@ -158,6 +158,12 @@ HORIZON_HEADROOM_RATIO = 2.0
 # sit where quota returns first, however far out — rather than parking on
 # whichever account we happen to hold.
 SPENT_HEADROOM_PCT = 3.0
+
+# Triggers that move a healthy account (cooldown and the no-return bar
+# apply), and the below-threshold subset that only fires for an opted-in
+# strategy: consume-first (soonest weekly reset) and smart (recommend.py).
+_OPPORTUNISTIC_TRIGGERS = ("consume-first", "smart")
+_PROACTIVE_TRIGGERS = ("proactive", *_OPPORTUNISTIC_TRIGGERS, "priority")
 
 
 def _recovery_is_useful(
@@ -372,7 +378,7 @@ class PollEvent(AutoSwitchEvent):
 @dataclass(frozen=True)
 class SwitchEvent(AutoSwitchEvent):
     kind: ClassVar[str] = "switch"
-    # "proactive" | "at-limit" | "hard-limit" | "failover" | "consume-first"
+    # "proactive" | "at-limit" | "hard-limit" | "failover" | "consume-first" | "smart"
     # | "priority" (return to a more-preferred account; see rules.py)
     trigger: str
     from_ref: dict | None
@@ -1130,7 +1136,7 @@ class AutoSwitchEngine:
                     # it. Proactive family — cooldown and the no-return bar
                     # apply — but ranked by priority, not headroom margin.
                     trigger = "priority"
-                elif settings.strategy != "consume-first":
+                elif settings.strategy not in _OPPORTUNISTIC_TRIGGERS:
                     self._emit(
                         NoSwitchEvent(
                             reason="below-threshold",
@@ -1145,8 +1151,9 @@ class AutoSwitchEngine:
                     # move to whichever account's weekly window resets soonest,
                     # to burn the most-perishable quota first. Candidate
                     # selection decides whether a sooner-resetting account
-                    # with room actually exists.
-                    trigger = "consume-first"
+                    # with room actually exists. `smart` is the same shape,
+                    # moving to clearly more perishable quota (recommend.py).
+                    trigger = settings.strategy
             elif active_headroom <= 0:
                 # At its limit — the provider's, or the slot's own hard limit
                 # (rules.py). Both are escapes, not proactive moves; the name
@@ -1205,7 +1212,7 @@ class AutoSwitchEngine:
             trigger = "failover"
 
         if (
-            trigger in ("proactive", "consume-first", "priority")
+            trigger in _PROACTIVE_TRIGGERS
             and self._in_cooldown(state)
         ):
             self._emit(NoSwitchEvent(reason="cooldown"))
@@ -1230,7 +1237,7 @@ class AutoSwitchEngine:
             else []
         )
         if (
-            trigger == "consume-first"
+            trigger in _OPPORTUNISTIC_TRIGGERS
             and not oauth_candidates
             and active_headroom is not None
         ):
@@ -1257,6 +1264,7 @@ class AutoSwitchEngine:
             return TickOutcome.BLOCKED
 
         consume_first = settings.strategy == "consume-first"
+        smart = settings.strategy == "smart"
 
         def _rank(**kw):
             """Rank with the no-return bar, and WITHOUT it if that empties AND
@@ -1335,6 +1343,7 @@ class AutoSwitchEngine:
         ordered, any_known, active_reset_ts = _rank(
             trigger=trigger,
             consume_first=consume_first,
+            smart=smart,
             oauth_candidates=oauth_candidates,
             usage=usage,
             headroom=headroom,
@@ -1344,7 +1353,7 @@ class AutoSwitchEngine:
             now=decided_now,
         )
 
-        if trigger == "consume-first" and ordered:
+        if trigger in _OPPORTUNISTIC_TRIGGERS and ordered:
             # Two-phase commit: the provisional pick may have ridden a
             # snapshot up to CANDIDATE_MAX_INTERVAL_S stale — consume-first
             # decides below the threshold, where the collector only escalates
@@ -1366,6 +1375,7 @@ class AutoSwitchEngine:
             ordered, any_known, active_reset_ts = _rank(
                 trigger=trigger,
                 consume_first=consume_first,
+                smart=smart,
                 oauth_candidates=oauth_candidates,
                 usage=usage,
                 headroom=headroom,
@@ -1375,7 +1385,7 @@ class AutoSwitchEngine:
                 now=decided_now,
             )
 
-        if not ordered and api_key_candidates and trigger != "consume-first":
+        if not ordered and api_key_candidates and trigger not in _OPPORTUNISTIC_TRIGGERS:
             # Last resort when we must move: metered API-key accounts
             # (unmeasurable headroom). Never for a below-threshold consume-first
             # nudge — those API-key accounts have no weekly window to consume.
@@ -1392,6 +1402,19 @@ class AutoSwitchEngine:
                     )
                 )
                 return TickOutcome.BLOCKED
+            if trigger == "smart":
+                # Below the threshold and healthy, and nothing's quota is
+                # clearly more perishable: staying is the right outcome.
+                self._emit(
+                    NoSwitchEvent(
+                        reason="already-on-best",
+                        detail=(
+                            "no account's remaining weekly quota expires "
+                            "meaningfully sooner than this one's"
+                        ),
+                    )
+                )
+                return TickOutcome.NO_ACTION
             if trigger == "consume-first":
                 # Below the threshold and healthy: staying put is a correct
                 # outcome, never a block. Distinguish *why* nothing qualified
@@ -1471,7 +1494,7 @@ class AutoSwitchEngine:
         systemic = ""
         for num in ordered:
             email = self.switcher.account_email(num)
-            if trigger == "consume-first":
+            if trigger in _OPPORTUNISTIC_TRIGGERS:
                 # The phase-2 refetch is best-effort: the collector refuses
                 # accounts in failure backoff or claimed by a concurrent
                 # poller, which then serve their stored entries. Consume-first
@@ -1625,7 +1648,7 @@ class AutoSwitchEngine:
         left, or only a different active?
         """
         came_from = state.get("lastSwitchFrom")
-        if trigger not in ("proactive", "consume-first", "priority") or came_from is None:
+        if trigger not in _PROACTIVE_TRIGGERS or came_from is None:
             return None
         # Only while we are still standing where that switch put us. A manual
         # switch away already undid the move, so there is nothing left to
@@ -1916,6 +1939,7 @@ class AutoSwitchEngine:
         trigger: str,
         consume_first: bool,
         oauth_candidates: list[str],
+        smart: bool = False,
         no_return: str | None,
         usage: dict[str, dict | str | None],
         headroom: dict[str, float | None],
@@ -1981,6 +2005,16 @@ class AutoSwitchEngine:
             else 0.0  # unread unless all_above; never a live sentinel
         )
 
+        # smart ranks on perishability (recommend.py): the weekly room left
+        # over the hours until that window resets, on the capped scale.
+        active_outlook = (
+            recommend.outlook(
+                usage.get(current), self._rule_for(current), self._models, now
+            )
+            if smart
+            else None
+        )
+
         qualifying: list[tuple[tuple, str]] = []
         fallback: list[tuple[tuple, str]] = []
         any_known = False
@@ -2001,7 +2035,12 @@ class AutoSwitchEngine:
                 if all_above
                 else 0.0
             )
-            if trigger in ("proactive", "consume-first", "priority"):
+            cand_outlook = (
+                recommend.outlook(usage.get(num), self._rule_for(num), self._models, now)
+                if smart
+                else None
+            )
+            if trigger in _PROACTIVE_TRIGGERS:
                 # Landing must be healthy: an account at/over ITS threshold
                 # would re-trigger on the very next tick. At-limit, hard-limit
                 # and failover are escapes that skip this whole block — any
@@ -2062,6 +2101,16 @@ class AutoSwitchEngine:
                                     num,
                                 ))
                             continue
+                elif smart and trigger != "priority":
+                    # Never land somewhere about to hit a 5-hour limit, and
+                    # below the threshold move only to clearly more
+                    # perishable quota (the ratio is also the anti-flap).
+                    if cand_outlook is None or not cand_outlook.usable:
+                        continue
+                    if trigger == "smart" and not recommend.beats(
+                        cand_outlook, active_outlook
+                    ):
+                        continue
                 elif consume_first:
                     # Purely proactive on reset ordering: below the threshold,
                     # only move to accounts whose weekly window resets sooner
@@ -2082,7 +2131,7 @@ class AutoSwitchEngine:
                     # no-return bar.
                     if h - active_headroom < settings.hysteresis_pct:
                         continue
-            if all_above and trigger in ("proactive", "consume-first", "priority"):
+            if all_above and trigger in _PROACTIVE_TRIGGERS:
                 # Ranked on the axis its own gate decided, and TIERED so the two
                 # stay comparable: a candidate returning inside the horizon
                 # beats one that does not, whatever its headroom. Untiered, the
@@ -2107,6 +2156,9 @@ class AutoSwitchEngine:
                 key: tuple = (
                     (0, recovery_ts, -h) if by_recovery else (1, -h, recovery_ts)
                 )
+            elif smart and cand_outlook is not None:
+                # Most perishable quota first, most headroom breaks ties.
+                key = (-(cand_outlook.urgency or 0.0), -h)
             elif consume_first:
                 # Soonest weekly reset first (unknown resets sort last), most
                 # headroom breaks ties, then sequence order.
@@ -2303,7 +2355,7 @@ class AutoSwitchEngine:
         with self._state_lock():
             state = self._read_state()
             if (
-                trigger in ("proactive", "consume-first", "priority")
+                trigger in _PROACTIVE_TRIGGERS
                 and self._in_cooldown(state)
             ):
                 self._emit(NoSwitchEvent(reason="cooldown"))
