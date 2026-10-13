@@ -140,6 +140,33 @@ class TestPush:
         from claude_swap.pool.session import load_session
         assert load_session(s.backup_dir).access_token != session.access_token
 
+    def test_process_with_old_snapshot_reuses_another_process_refresh(self, sync_env, fake_pool):
+        s, _, session = sync_env
+        now = session.expires_at - 10
+        fake_pool.clock = lambda: now
+        client = PoolClient(fake_pool.base_url, fake_pool.anon_key, transport=fake_pool, clock=lambda: now)
+        first = PoolSync(s, client, session, machine_id="first")
+        second = PoolSync(s, client, session, machine_id="second")
+        assert first.run_pass().skipped is None
+        assert second.run_pass().skipped is None
+        assert first.session == second.session
+        assert first.session.refresh_token != session.refresh_token
+        assert sum("grant_type=refresh_token" in url for _, url in fake_pool.calls) == 1
+
+    def test_share_and_withdraw_refresh_an_expired_pool_login(self, sync_env, fake_pool):
+        s, _, session = sync_env
+        now = [session.expires_at + 1]
+        fake_pool.clock = lambda: now[0]
+        client = PoolClient(fake_pool.base_url, fake_pool.anon_key, transport=fake_pool, clock=lambda: now[0])
+        _seed(s, "1", "mine@x.io", "acct-mine", "rt-1", 1_000)
+        sync = PoolSync(s, client, session, machine_id="test-machine")
+        row = sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None)
+        assert sync.session.refresh_token != session.refresh_token
+        now[0] = sync.session.expires_at + 1
+        sync.withdraw_slot("1")
+        assert fake_pool.row(row.id)["status"] == "withdrawn"
+        assert sum("grant_type=refresh_token" in url for _, url in fake_pool.calls) == 2
+
     def test_session_refused_mid_pass_skips(self, sync_env, fake_pool, owner, monkeypatch):
         s, client, session = sync_env
         row = _publish_row(fake_pool, client, owner, "acct-1", "rt-1", 1_000)

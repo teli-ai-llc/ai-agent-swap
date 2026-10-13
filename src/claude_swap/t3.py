@@ -10,7 +10,7 @@ from claude_swap.t3_sync import provider_name
 
 
 def prepare_provider(switcher, identifier: str) -> dict:
-    """Use the existing session lifecycle, including refresh reconciliation."""
+    """Prepare a profile without spending the account's refresh grant."""
     if os.environ.get("CLAUDE_CONFIG_DIR"):
         raise SessionError("Run T3 profile preparation outside a CLAUDE_CONFIG_DIR session shell.")
     number, email, org_uuid = switcher.resolve_account(identifier)
@@ -25,7 +25,7 @@ def prepare_provider(switcher, identifier: str) -> dict:
             "displayName": provider_name(email, active=True), "binaryPath": "claude",
             "configDir": None, "accountPinned": False,
         }
-    directory, number, email = launcher.setup_session(identifier, share=True)
+    directory, number, email = launcher.setup_session(identifier, share=True, refresh=False)
     return {
         "schemaVersion": 1, "accountNumber": int(number), "email": email,
         "displayName": provider_name(email),

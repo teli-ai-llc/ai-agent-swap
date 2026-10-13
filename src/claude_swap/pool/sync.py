@@ -14,11 +14,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from claude_swap.credentials import looks_like_api_key
-from claude_swap.exceptions import ClaudeSwitchError, PoolAuthError, PoolError
+from claude_swap.exceptions import ClaudeSwitchError, LockError, PoolAuthError, PoolError
 from claude_swap.oauth import credential_fingerprint
 from claude_swap.pool.blob import blob_fingerprint, blob_from_local, blob_to_local, blob_version
 from claude_swap.pool.client import PoolAccountRow, PoolClient
-from claude_swap.pool.session import PoolSession, save_session
+from claude_swap.pool.session import PoolSession, refresh_session
 from claude_swap.settings import atomic_write_json
 
 #: Pool schemas this cswap speaks. v1 is the original; v2 (migration 0004)
@@ -156,16 +156,16 @@ class PoolSync:
         report = PassReport()
         state = load_state(self.switcher.backup_dir)
         try:
-            fresh = self.client.ensure_fresh(self.session)
-            if fresh is not self.session:
-                self.session = fresh
-                save_session(self.switcher.backup_dir, fresh)
+            self.session = refresh_session(self.switcher.backup_dir, self.client, self.session)
             unsupported = schema_unsupported(self.client.schema_version(self.session))
             if unsupported:
                 report.skipped = unsupported
                 return report
         except PoolAuthError as e:
             report.skipped = f"pool session refused ({e}); run: cswap pool login"
+            return report
+        except LockError:
+            report.skipped = "pool session busy; retry on the next pass"
             return report
         except PoolError as e:
             report.skipped = f"pool unreachable: {e}"
@@ -497,6 +497,8 @@ class PoolSync:
         account_uuid = blob["oauthAccount"]["accountUuid"]
         org_uuid = blob["oauthAccount"].get("organizationUuid") or ""
 
+        self.session = refresh_session(self.switcher.backup_dir, self.client, self.session)
+
         # The pace column exists from schema v2 on. Before that, sending it
         # is a 400 from PostgREST, so a plain share leaves it out entirely
         # (None) and a pace share is refused by name.
@@ -563,6 +565,7 @@ class PoolSync:
             raise PoolError(f"slot {num} is not in the pool")
         if not owned:
             raise PoolError(f"slot {num} is borrowed; only its owner can withdraw it (remove it locally with cswap remove)")
+        self.session = refresh_session(self.switcher.backup_dir, self.client, self.session)
         self.client.set_status(self.session, account_id, "withdrawn", self.machine_id)
         self.switcher.set_slot_pool_info(num, None, False)
 

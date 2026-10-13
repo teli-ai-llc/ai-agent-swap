@@ -40,6 +40,20 @@ def prepare(num):
     return Path("/profiles") / num
 
 
+def test_default_profile_preparation_never_requests_refresh(environment, monkeypatch):
+    switcher, _, _ = environment
+    calls = []
+    class Launcher:
+        def __init__(self, *args, **kwargs):
+            pass
+        def setup_session(self, num, *, share, refresh):
+            calls.append((num, share, refresh))
+            return prepare(num), num, "unused"
+    monkeypatch.setattr("claude_swap.t3_sync.SessionManager", Launcher)
+    sync_once(switcher, force=True)
+    assert calls == [("2", True, False), ("3", True, False)]
+
+
 def test_add_remove_and_repeat_are_idempotent(environment):
     switcher, target, records = environment
     owner = owner_key(switcher.backup_dir)

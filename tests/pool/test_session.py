@@ -6,6 +6,9 @@ import json
 import os
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,7 +20,9 @@ from claude_swap.pool.session import (
     load_session,
     machine_id,
     save_session,
+    refresh_session,
 )
+from claude_swap.exceptions import PoolAuthError
 
 
 def _session(**overrides) -> PoolSession:
@@ -57,6 +62,57 @@ class TestSessionFile:
         save_session(tmp_path, _session())
         assert clear_session(tmp_path) is True
         assert load_session(tmp_path) is None
+
+
+class TestRefreshSession:
+    def test_overlapping_refreshes_adopt_the_saved_successor(self, tmp_path):
+        old = _session(expires_at=0)
+        fresh = _session(access_token="next-at", refresh_token="next-rt")
+        save_session(tmp_path, old)
+        entered = Event()
+        release = Event()
+        second_started = Event()
+        consumed = []
+
+        def ensure_fresh(current):
+            if current == fresh:
+                return current
+            consumed.append(current.refresh_token)
+            entered.set()
+            assert release.wait(5)
+            return fresh
+
+        client = SimpleNamespace(ensure_fresh=ensure_fresh)
+        def second():
+            second_started.set()
+            return refresh_session(tmp_path, client, old)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(refresh_session, tmp_path, client, old)
+            try:
+                assert entered.wait(5)
+                other = executor.submit(second)
+                assert second_started.wait(5)
+            finally:
+                release.set()
+            assert first.result(timeout=5) == fresh
+            assert other.result(timeout=5) == fresh
+        assert consumed == ["rt"]
+        assert load_session(tmp_path) == fresh
+
+    def test_old_process_cannot_restore_logout_or_another_login(self, tmp_path):
+        old = _session()
+        client = SimpleNamespace(ensure_fresh=lambda _: pytest.fail("must not refresh"))
+        save_session(tmp_path, old)
+        clear_session(tmp_path)
+        with pytest.raises(PoolAuthError, match="no stored"):
+            refresh_session(tmp_path, client, old)
+        assert load_session(tmp_path) is None
+        other = _session(user_id="another-member")
+        save_session(tmp_path, other)
+        with pytest.raises(PoolAuthError, match="changed"):
+            refresh_session(tmp_path, client, old)
+        assert load_session(tmp_path) == other
 
 
 class TestMachineId:

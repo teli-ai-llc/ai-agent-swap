@@ -9,7 +9,7 @@ import pytest
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.pool.sync import PoolSync, load_state
 from claude_swap.rules import rule_from_record
-from tests.pool.conftest import _config, _creds, _publish_row, _seed
+from tests.pool.conftest import _saved_session, _config, _creds, _publish_row, _seed
 
 MID = "11111111-1111-1111-1111-111111111111"
 
@@ -21,7 +21,7 @@ def _login(s, num, email):
 class TestPull:
     def test_new_shared_row_lands_in_a_free_slot_as_borrowed(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         client.update_sharing(fake_pool.session_for(owner), row.id, shared=True, swap_limit=80.0, hard_limit=50.0)
         report = PoolSync(s, client, session, machine_id=MID).run_pass()
@@ -41,7 +41,7 @@ class TestPull:
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         client.update_sharing(fake_pool.session_for(owner), row.id, shared=True,
                               swap_limit=None, hard_limit=None, hard_pace=True)
-        PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID).run_pass()
+        PoolSync(s, client, _saved_session(s, fake_pool.session_for(borrower)), machine_id=MID).run_pass()
         record = s._get_sequence_data()["accounts"]["1"]
         rule = rule_from_record(record)
         assert (rule.hard_limit, rule.hard_pace, rule.priority) == (100.0, True, 2)
@@ -68,7 +68,7 @@ class TestPull:
 
     def test_newer_row_replaces_backup(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         client.push_credential(fake_pool.session_for(owner), row.id,
@@ -94,7 +94,7 @@ class TestPull:
 
     def test_active_login_is_rewritten(self, sync_env, fake_pool, owner, borrower, temp_home):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         (temp_home / ".claude.json").write_text(_config("acct-o@x.io", "acct-o"))
@@ -110,7 +110,7 @@ class TestPull:
 
     def test_active_rewrite_requires_matching_org(self, sync_env, fake_pool, owner, borrower, temp_home):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         # same email, different org than the slot -- not the same live identity
@@ -129,7 +129,7 @@ class TestPull:
 
     def test_withdrawn_removes_borrowed_slot_only(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         client.set_status(fake_pool.session_for(owner), row.id, "withdrawn", MID)
@@ -139,7 +139,7 @@ class TestPull:
 
     def test_refused_removal_keeps_slot_unlinked(self, sync_env, fake_pool, owner, borrower, monkeypatch):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         _seed(s, "3", "acct-o@x.io", "acct-o", "rt-1", 1_000, pool_id=row.id)
         client.set_status(fake_pool.session_for(owner), row.id, "withdrawn", MID)
@@ -156,7 +156,7 @@ class TestPull:
 
     def test_invalid_blob_is_skipped_and_watermark_advances(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         fake_pool.row(row.id)["credential"] = {"garbage": True}
         report = PoolSync(s, client, session, machine_id=MID).run_pass()
@@ -165,7 +165,7 @@ class TestPull:
 
     def test_local_write_failure_holds_watermark(self, sync_env, fake_pool, owner, borrower, monkeypatch):
         s, client, _ = sync_env
-        session = fake_pool.session_for(borrower)
+        session = _saved_session(s, fake_pool.session_for(borrower))
         _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         monkeypatch.setattr(
             s, "_write_account_credentials",
@@ -190,7 +190,7 @@ class TestOwnerLimitChangesReachExistingBorrowers:
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
         client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=swap, hard_limit=hard,
                               hard_pace=pace)
-        sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
+        sync = PoolSync(s, client, _saved_session(s, fake_pool.session_for(borrower)), machine_id=MID)
         assert sync.run_pass().added == ["1"]
         return s, client, sync, row
 
@@ -385,7 +385,7 @@ def test_unlinking_a_slot_forgets_what_the_owner_allowed(sync_env, fake_pool, ow
     row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
     client.update_sharing(fake_pool.session_for(owner), row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
                           hard_pace=True)
-    PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID).run_pass()
+    PoolSync(s, client, _saved_session(s, fake_pool.session_for(borrower)), machine_id=MID).run_pass()
     record = s._get_sequence_data()["accounts"]["1"]
     assert record["poolShareSwapLimit"] == 80.0 and record["poolShareHardLimit"] == 50.0
     assert record["poolShareHardPace"] is True
@@ -407,7 +407,7 @@ class TestConcurrentPassesNeverDuplicateASlot:
     def test_landing_a_row_twice_reuses_the_slot(self, sync_env, fake_pool, owner, borrower):
         s, client, _ = sync_env
         row = _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
-        sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
+        sync = PoolSync(s, client, _saved_session(s, fake_pool.session_for(borrower)), machine_id=MID)
         assert sync.run_pass().added == ["1"]
 
         # the racing pass: it read the roster before the first pass wrote it,
@@ -424,7 +424,7 @@ class TestConcurrentPassesNeverDuplicateASlot:
     def test_a_racing_pass_reports_nothing_added(self, sync_env, fake_pool, owner, borrower, monkeypatch):
         s, client, _ = sync_env
         _publish_row(fake_pool, client, owner, "acct-o", "rt-1", 1_000)
-        sync = PoolSync(s, client, fake_pool.session_for(borrower), machine_id=MID)
+        sync = PoolSync(s, client, _saved_session(s, fake_pool.session_for(borrower)), machine_id=MID)
         assert sync.run_pass().added == ["1"]
 
         # The race, exactly: the check in `_apply_row` reads a roster written

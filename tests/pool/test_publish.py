@@ -113,6 +113,7 @@ class TestPublishSlot:
 
         member = fake_pool.add_member("member@x.io", "pw-member")
         member_session = fake_pool.session_for(member)
+        save_session(s.backup_dir, member_session)
         sync = PoolSync(s, client, member_session, machine_id=MID)
         with pytest.raises(PoolError, match="not shared it with you"):
             sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None)

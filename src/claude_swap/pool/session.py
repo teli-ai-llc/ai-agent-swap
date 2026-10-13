@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from claude_swap.fsutil import replace_with_retry
+from claude_swap.exceptions import PoolAuthError
+from claude_swap.locking import FileLock
 from claude_swap.settings import atomic_write_json
 
 POOL_SESSION_FILENAME = "pool_session.json"
@@ -76,6 +78,11 @@ def load_session(backup_root: Path) -> PoolSession | None:
 
 
 def save_session(backup_root: Path, session: PoolSession) -> None:
+    with FileLock(backup_root / "pool_session.lock", timeout=30):
+        _save_session_unlocked(backup_root, session)
+
+
+def _save_session_unlocked(backup_root: Path, session: PoolSession) -> None:
     data = {"schemaVersion": SESSION_SCHEMA_VERSION}
     for field, key in _FIELD_TO_KEY.items():
         data[key] = getattr(session, field)
@@ -84,11 +91,34 @@ def save_session(backup_root: Path, session: PoolSession) -> None:
 
 def clear_session(backup_root: Path) -> bool:
     """Remove the session file; False when there was none."""
-    try:
-        os.unlink(session_path(backup_root))
-    except FileNotFoundError:
-        return False
-    return True
+    with FileLock(backup_root / "pool_session.lock", timeout=30):
+        try:
+            os.unlink(session_path(backup_root))
+        except FileNotFoundError:
+            return False
+        return True
+
+
+def refresh_session(backup_root: Path, client, expected: PoolSession) -> PoolSession:
+    """Reload, refresh and persist under one cross-process lock.
+
+    A UI and background service can hold the same old snapshot. Only the
+    saved session may be refreshed; the waiting process adopts its successor.
+    Login/logout use this lock too, so a late refresh cannot undo logout or
+    overwrite a new login.
+    """
+    with FileLock(backup_root / "pool_session.lock", timeout=30):
+        current = load_session(backup_root)
+        if current is None:
+            raise PoolAuthError("no stored pool session")
+        if (current.url, current.anon_key, current.user_id) != (
+            expected.url, expected.anon_key, expected.user_id
+        ):
+            raise PoolAuthError("pool login changed; restart this cswap process")
+        fresh = client.ensure_fresh(current)
+        if fresh is not current:
+            _save_session_unlocked(backup_root, fresh)
+        return fresh
 
 
 def machine_id(backup_root: Path) -> str:
