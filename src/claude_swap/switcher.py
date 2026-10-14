@@ -2047,6 +2047,7 @@ class ClaudeAccountSwitcher:
         priority=KEEP,
         reset: bool = False,
         quiet: bool = False,
+        hard_taper=KEEP,
     ) -> tuple[str, str, AccountRule]:
         """Set (or clear) a slot's swap limit / hard limit / priority.
 
@@ -2070,6 +2071,7 @@ class ClaudeAccountSwitcher:
             record,
             swap_limit=swap_limit,
             hard_limit=hard_limit,
+            hard_taper=hard_taper,
             priority=priority,
             reset=reset,
         )
@@ -5828,7 +5830,7 @@ class ClaudeAccountSwitcher:
                 # printed, so the cap reads as the number it is right now.
                 progress = (
                     week_progress(entries[str(num)].last_good, self._usage_store.clock())
-                    if rule.hard_pace else None
+                    if rule.hard_pace or rule.hard_taper else None
                 )
                 print(f"     {dimmed('•')} {muted('rule: ' + rule.summary(progress=progress))}")
 

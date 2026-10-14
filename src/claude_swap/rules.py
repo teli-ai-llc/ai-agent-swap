@@ -20,6 +20,15 @@ edited behaves exactly as before the rules existed.
   Right after a weekly reset that is ~0; unknown progress (no ``resets_at``
   yet) leaves only the number. Spelled ``pace`` wherever a hard limit is
   typed. Default off.
+- ``hard_taper`` — the reserve the hard limit keeps shrinks as the week runs
+  out: the limit holds back ``100 - hard_limit`` of the account, and taper
+  holds back only that share of what is *left* of the week, so the cap is
+  ``100 - (100 - hard_limit) × share of the week left``. A 50% limit is 50%
+  right after a reset, 80% with 40% of the week left, and 100% at the reset:
+  quota the owner was keeping for themselves becomes borrowable just as it
+  would otherwise expire unused. Resolved like pace (``resolve_rule``);
+  unknown progress leaves the plain number, the stricter reading. Exclusive
+  with pace (setting one clears the other). Default off.
 - ``priority`` — 1 is most preferred. Candidates are ranked by priority
   first, then by the strategy (most headroom / soonest reset), and while a
   lower-priority account is active the engine returns to a higher-priority
@@ -44,7 +53,7 @@ SWAP_LIMIT_RANGE = (1.0, 100.0)
 HARD_LIMIT_RANGE = (1.0, 100.0)
 PRIORITY_RANGE = (1, 99)
 
-_KEYS = ("swapLimit", "hardLimit", "hardLimitPace", "priority")
+_KEYS = ("swapLimit", "hardLimit", "hardLimitPace", "hardLimitTaper", "priority")
 
 # ``parse_hard_limit``'s answer for "pace": the caller hands it to
 # ``apply_rule(hard_limit=PACE)``, which sets the flag and lifts the number.
@@ -67,6 +76,7 @@ class AccountRule:
     hard_limit: float = 100.0
     priority: int = 1
     hard_pace: bool = False  # hard limit also bound by the week's progress
+    hard_taper: bool = False  # hard limit's reserve shrinks with the week left
 
     @property
     def is_default(self) -> bool:
@@ -101,6 +111,11 @@ class AccountRule:
             if self.hard_limit < 100.0:
                 hard += f" ≤{_pct(self.hard_limit)}%"
             parts.append(hard)
+        elif self.hard_taper and self.hard_limit < 100.0:
+            hard = f"hard {_pct(self.hard_limit)}% taper"
+            if progress is not None:
+                hard += f" (now {taper_limit(self.hard_limit, progress):.0f}%)"
+            parts.append(hard)
         elif self.hard_limit < 100.0:
             parts.append(f"hard {_pct(self.hard_limit)}%")
         return " · ".join(parts)
@@ -114,6 +129,8 @@ class AccountRule:
             out["hardLimit"] = self.hard_limit
         if self.hard_pace:
             out["hardLimitPace"] = True
+        if self.hard_taper:
+            out["hardLimitTaper"] = True
         if self.priority != 1:
             out["priority"] = self.priority
         return out
@@ -145,6 +162,8 @@ def rule_from_record(record: dict | None) -> AccountRule:
         hard_limit=hard if hard is not None else 100.0,
         priority=prio if prio is not None else 1,
         hard_pace=record.get("hardLimitPace") is True,
+        hard_taper=record.get("hardLimitTaper") is True
+        and record.get("hardLimitPace") is not True,
     )
 
 
@@ -178,6 +197,19 @@ def parse_hard_limit(raw: str | float | None) -> float | str:
                 f"hard limit must be a number (percent) or 'pace', got '{text}'"
             ) from None
     return _bounded(float(raw), HARD_LIMIT_RANGE, "hard limit")
+
+
+TAPER = "taper"
+
+
+def split_taper(raw: str | None) -> tuple[str | None, bool]:
+    """``"50 taper"`` → ``("50", True)``: the hard-limit text a form typed,
+    without its ``taper`` word, and whether it had one."""
+    if raw is None:
+        return None, False
+    words = raw.replace(",", " ").split()
+    taper = any(w.lower() == TAPER for w in words)
+    return " ".join(w for w in words if w.lower() != TAPER), taper
 
 
 def parse_priority(raw: str | int | None) -> int:
@@ -219,6 +251,7 @@ def apply_rule(
     swap_limit: Any = KEEP,
     hard_limit: Any = KEEP,
     hard_pace: Any = KEEP,
+    hard_taper: Any = KEEP,
     priority: Any = KEEP,
     reset: bool = False,
 ) -> AccountRule:
@@ -230,6 +263,9 @@ def apply_rule(
     :data:`PACE` sets it and lifts the number. ``hard_pace`` is the flag on
     its own, for callers (the pool sync) that carry the two separately; given
     together with a number it wins over the number's clearing.
+    ``hard_taper`` is the taper flag (``KEEP``: unchanged, unless pace is
+    being turned on). Pace and taper are exclusive: turning one on turns
+    the other off.
     """
     current = AccountRule() if reset else rule_from_record(record)
     if hard_limit is PACE:
@@ -240,11 +276,17 @@ def apply_rule(
         number, flag = hard_limit, False
     if hard_pace is not KEEP:
         flag = bool(hard_pace)
+    taper = current.hard_taper if hard_taper is KEEP else bool(hard_taper)
+    if taper and hard_taper is not KEEP:
+        flag = False  # taper asked for now: it replaces pace
+    elif flag:
+        taper = False
     updated = replace(
         current,
         swap_limit=current.swap_limit if swap_limit is KEEP else swap_limit,
         hard_limit=number,
         hard_pace=flag,
+        hard_taper=taper,
         priority=current.priority if priority is KEEP else priority,
     )
     for key in _KEYS:
@@ -270,17 +312,30 @@ def week_progress(usage: dict | str | None, now: float) -> float | None:
     return None if result is None else result.expected_pct
 
 
+def taper_limit(hard_limit: float, progress: float) -> float:
+    """A tapered hard limit at ``progress`` (0–100) through the week:
+    ``100 - (100 - hard_limit) × share of the week left``."""
+    left = max(0.0, min(1.0, 1.0 - progress / 100.0))
+    return 100.0 - (100.0 - hard_limit) * left
+
+
 def resolve_rule(rule: AccountRule, usage: dict | str | None, now: float) -> AccountRule:
-    """The plain rule a pace-bound one means right now: ``hard_limit`` is the
-    stricter of its number and the week's progress, and the flag is gone, so
-    every consumer of ``AccountRule`` sees a fixed limit. Unknown progress
-    leaves only the number. A rule without the flag is returned as is."""
-    if not rule.hard_pace:
+    """The plain rule a pace-bound or tapered one means right now, with the
+    flag gone, so every consumer of ``AccountRule`` sees a fixed limit.
+    Pace: the stricter of the number and the week's progress. Taper:
+    :func:`taper_limit`. Unknown progress leaves only the number. A rule
+    without either flag is returned as is."""
+    if not (rule.hard_pace or rule.hard_taper):
         return rule
     progress = week_progress(usage, now)
+    plain = replace(rule, hard_pace=False, hard_taper=False)
     if progress is None:
-        return replace(rule, hard_pace=False)
-    return replace(rule, hard_limit=min(rule.hard_limit, progress), hard_pace=False)
+        return plain
+    if rule.hard_pace:
+        return replace(plain, hard_limit=min(rule.hard_limit, progress))
+    if rule.hard_limit >= 100.0:
+        return plain
+    return replace(plain, hard_limit=taper_limit(rule.hard_limit, progress))
 
 
 # -- engine math ---------------------------------------------------------------

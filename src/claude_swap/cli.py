@@ -511,6 +511,7 @@ def _rule_command(argv: list[str]) -> None:
         parse_hard_limit,
         parse_priority,
         parse_swap_limit,
+        taper_limit,
         week_progress,
     )
     from claude_swap.settings import load_settings
@@ -524,6 +525,9 @@ def _rule_command(argv: list[str]) -> None:
             "— not a switch target, and left at once when active (default 100). "
             "'pace' (the bare --hard-limit) makes it the share of the account's "
             "7-day window that has passed, so it is never used ahead of pace. "
+            "--taper shrinks the hard limit's reserve with the week: the cap is "
+            "100 - (100 - limit) x share of the week left, so a 50% limit is "
+            "80% with 40% of the week left and 100% at the reset. "
             "priority: 1 is most preferred; lower numbers win, ties route by "
             "usage, and the engine returns to a higher-priority account as soon "
             "as it is healthy again (default 1)."
@@ -534,6 +538,7 @@ Examples:
   cswap rule                                  # list every account's rule
   cswap rule 3 --priority 2 --hard-limit      # a backup: only when others are out, never ahead of its week
   cswap rule 3 --priority 2 --hard-limit 50   # ... or only to a fixed 50%
+  cswap rule 3 --hard-limit 50 --taper        # 50%, loosening to 100% as the week runs out
   cswap rule 1 --swap-limit 95
   cswap rule 3 --hard-limit off               # clear one field
   cswap rule 3 --reset                        # clear all three
@@ -554,6 +559,10 @@ Examples:
         help="'pace' (the bare flag): the share of the week that has passed; or 1-100, or 'off' (= 100)",
     )
     parser.add_argument(
+        "--taper", action=argparse.BooleanOptionalAction, default=None,
+        help="The hard limit's reserve shrinks with the week left (--no-taper: a fixed limit)",
+    )
+    parser.add_argument(
         "--priority", metavar="N", help="1-99 (1 = most preferred), or 'off' (= 1)",
     )
     parser.add_argument(
@@ -564,7 +573,7 @@ Examples:
     args = parser.parse_args(argv)
 
     editing = args.reset or any(
-        v is not None for v in (args.swap_limit, args.hard_limit, args.priority)
+        v is not None for v in (args.swap_limit, args.hard_limit, args.priority, args.taper)
     )
     if args.account is None and editing:
         parser.error("NUM|EMAIL is required when setting a rule")
@@ -601,6 +610,7 @@ Examples:
                             "swapLimit": rule.swap_limit,
                             "hardLimit": rule.hard_limit,
                             "hardLimitPace": rule.hard_pace,
+                            "hardLimitTaper": rule.hard_taper,
                             "priority": rule.priority,
                         }
                         for num, email, rule in rows
@@ -614,7 +624,10 @@ Examples:
             # A pace-bound limit is shown with the number it means right now,
             # from the usage already on disk (never a fetch).
             entries: dict = {}
-            if any(rule is not None and rule.hard_pace for _, _, rule in rows):
+            if any(
+                rule is not None and (rule.hard_pace or rule.hard_taper)
+                for _, _, rule in rows
+            ):
                 try:
                     entries = switcher.usage_entries_by_account(fetch=set())
                 except Exception:
@@ -635,6 +648,12 @@ Examples:
                     hard = "pace" + (f" ({progress:.0f}%)" if progress is not None else "")
                     if rule.hard_limit < 100.0:
                         hard += f" ≤{rule.hard_limit:.10g}%"
+                elif rule.hard_taper and rule.hard_limit < 100.0:
+                    entry = entries.get(num)
+                    progress = week_progress(entry.last_good if entry else None, now)
+                    hard = f"{rule.hard_limit:.10g}% taper"
+                    if progress is not None:
+                        hard += f" (now {taper_limit(rule.hard_limit, progress):.0f}%)"
                 else:
                     hard = f"{rule.hard_limit:.10g}%"
                 print(
@@ -654,6 +673,7 @@ Examples:
             args.account,
             swap_limit=swap,
             hard_limit=hard,
+            hard_taper=KEEP if args.taper is None else args.taper,
             priority=prio,
             reset=args.reset,
             quiet=args.json,
@@ -666,6 +686,7 @@ Examples:
                 "swapLimit": rule.swap_limit,
                 "hardLimit": rule.hard_limit,
                 "hardLimitPace": rule.hard_pace,
+                "hardLimitTaper": rule.hard_taper,
                 "priority": rule.priority,
             }, indent=2))
     except ClaudeSwitchError as e:

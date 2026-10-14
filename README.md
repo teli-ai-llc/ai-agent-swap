@@ -142,6 +142,14 @@ cswap pool share 1 --swap-limit 80 --hard-limit
 - **`--hard-limit 50`** is the fixed alternative: never past 50% of the
   5-hour or 7-day window, whatever the day. Use it when you want a flat
   reserve instead of a schedule.
+- **`--hard-limit 50 --taper`** keeps your 50% reserve only for the part of
+  the week that is left: the cap is `100 - (100 - 50) × share of the week
+  left`. Right after your reset it is 50%; with 40% of the week left it is
+  80%; at the reset it is 100%. The quota you were holding back becomes
+  borrowable just before it would expire unused, which is what teammates
+  on the `smart` strategy are looking for. Needs migration 0005 on the
+  pool (`supabase/migrations/0005_pool_taper_limit.sql`); until then
+  cswap refuses a taper share by name.
 - **swap limit 80** is where a teammate's cswap starts looking for a better
   account while it is on yours.
 - `--private` publishes it for your own machines only, not the team.
@@ -201,6 +209,7 @@ yours as soon as they have room.
 ```bash
 cswap pool share 1 --swap-limit 80 --hard-limit         # pace: never ahead of my week
 cswap pool share 1 --swap-limit 70 --hard-limit 40      # or a fixed 40%
+cswap pool share 1 --swap-limit 70 --hard-limit 40 --taper   # 40%, loosening as my week runs out
 cswap pool share 1 --swap-limit off --hard-limit off    # no limits
 ```
 
@@ -210,8 +219,9 @@ seconds. Nobody has to do anything.
 **How much I use of a BORROWED login.** Borrowed logins arrive with the
 owner's limits and follow the owner's later changes. You can make yours
 stricter and it will stick. A looser value is pulled back to the owner's
-limit at the next sync of that login. `cswap rule` shows a pace limit with
-the number it means right now, e.g. `hard pace (61%)`.
+limit at the next sync of that login. `cswap rule` shows a pace or taper
+limit with the number it means right now, e.g. `hard pace (61%)` or
+`hard 50% taper (now 80%)`.
 
 ```bash
 cswap rule                                   # show every account's rule
@@ -399,7 +409,7 @@ Defaults like the threshold and cooldown are configurable with `cswap config set
 Give each account its own limits and a priority; the auto-switcher and the `best` / `next-available` strategies honour them:
 
 - **swap limit** — where auto-switch starts looking for a better account while this one is active (default: the global `autoswitch.threshold`).
-- **hard limit** — never use the account past this. It is not a switch target once there, and if it is the active account the engine leaves it at once, even far below its swap limit. The bare `--hard-limit` (or `--hard-limit pace`) is the **pace** limit: the share of the account's 7-day window that has already passed — 60% through the week, 60% — recomputed on every tick, so the account is never used ahead of pace and the cap needs no adjusting. A number (`--hard-limit 50`) is the fixed alternative. Like a fixed limit, pace applies to whichever window is highest (5-hour, 7-day, or a per-model weekly one); right after a weekly reset it is 0 until the clock has moved, and while the 7-day window's reset time is not known yet nothing but the number binds.
+- **hard limit** — never use the account past this. It is not a switch target once there, and if it is the active account the engine leaves it at once, even far below its swap limit. The bare `--hard-limit` (or `--hard-limit pace`) is the **pace** limit: the share of the account's 7-day window that has already passed — 60% through the week, 60% — recomputed on every tick, so the account is never used ahead of pace and the cap needs no adjusting. A number (`--hard-limit 50`) is the fixed alternative, and `--hard-limit 50 --taper` loosens that number as the week runs out (`100 - (100 - 50) × share of the week left`: 80% with 40% left). Like a fixed limit, pace applies to whichever window is highest (5-hour, 7-day, or a per-model weekly one); right after a weekly reset it is 0 until the clock has moved, and while the 7-day window's reset time is not known yet nothing but the number binds.
 - **priority** — 1 is most preferred. Candidates are ranked by priority first, then by usage; while a lower-priority account is active, the engine returns to a higher-priority one as soon as it is healthy again.
 
 ```bash
@@ -714,7 +724,11 @@ anything looser than the owner allows is pulled back down. The pace flag
 follows the same rule, with "on" as the stricter state: an owner's pace
 reaches every borrower, a borrower's own pace survives, and a borrower's
 fixed number under an owner's pace means the stricter of the two at any
-moment. Priority is always the borrower's own. When a login's refresh token dies
+moment. Taper is the mirror image, with "off" as the stricter state: an
+owner's taper reaches borrowers who left the limit alone, and a borrower
+who turns it off (`cswap rule N --no-taper`) keeps a fixed limit. Taper and
+pace are exclusive; setting one clears the other. Priority is always the
+borrower's own. When a login's refresh token dies
 for good (it lapsed, or a real logout), whichever machine notices flags it,
 and the owner sees "your account … needs re-login" on `cswap list` and in
 the dashboard. The owner logs in with Claude Code and runs `cswap add`; the

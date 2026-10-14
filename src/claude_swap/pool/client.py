@@ -71,6 +71,9 @@ class PoolAccountRow:
     # Schema v2 (migration 0004): the owner's hard limit also tracks the
     # week's progress. A v1 row has no column and reads False.
     share_hard_limit_pace: bool = False
+    # Migration 0005: the owner's hard limit tapers with the week left. A
+    # row from a pool without the column reads False (a fixed limit).
+    share_hard_limit_taper: bool = False
 
     @classmethod
     def from_json(cls, d: dict) -> PoolAccountRow:
@@ -100,6 +103,7 @@ class PoolAccountRow:
             share_swap_limit=_num_or_none(d.get("share_swap_limit")),
             share_hard_limit=_num_or_none(d.get("share_hard_limit")),
             share_hard_limit_pace=d.get("share_hard_limit_pace") is True,
+            share_hard_limit_taper=d.get("share_hard_limit_taper") is True,
             updated_at=str(d.get("updated_at") or ""),
             updated_by_user_id=d.get("updated_by_user_id"),
             updated_by_machine_id=d.get("updated_by_machine_id"),
@@ -270,6 +274,15 @@ class PoolClient:
         except (KeyError, TypeError, ValueError):
             raise PoolError("pool_meta.schema_version is not a number") from None
 
+    def supports_taper(self, session: PoolSession) -> bool:
+        """Whether migration 0005 (``share_hard_limit_taper``) has run. A
+        feature flag in ``pool_meta`` rather than a schema version: a taper
+        only loosens a limit, so a cswap that ignores it enforces the plain
+        limit (the safe side) and need not stop syncing."""
+        rows = self._rest(session, "GET", "pool_meta",
+                          params={"key": "eq.hard_limit_taper", "select": "value"})
+        return bool(rows) and str(rows[0].get("value")) == "1"
+
     def member(self, session: PoolSession) -> dict:
         rows = self._rest(session, "GET", "pool_members",
                           params={"user_id": f"eq.{session.user_id}", "select": "user_id,display_name,role"})
@@ -322,12 +335,15 @@ class PoolClient:
 
     def update_sharing(self, session: PoolSession, account_id: str, *, shared: bool,
                        swap_limit: float | None, hard_limit: float | None,
-                       hard_pace: bool | None = None) -> None:
-        """``hard_pace=None`` leaves the pace column untouched — and unsent,
-        which is what a v1 pool (no such column) needs."""
+                       hard_pace: bool | None = None,
+                       hard_taper: bool | None = None) -> None:
+        """``hard_pace=None`` / ``hard_taper=None`` leave that column
+        untouched — and unsent, which is what a pool without it needs."""
         body: dict = {"shared": shared, "share_swap_limit": swap_limit, "share_hard_limit": hard_limit}
         if hard_pace is not None:
             body["share_hard_limit_pace"] = bool(hard_pace)
+        if hard_taper is not None:
+            body["share_hard_limit_taper"] = bool(hard_taper)
         rows = self._rest(
             session, "PATCH", "pool_accounts", params={"id": f"eq.{account_id}"},
             body=body, prefer="return=representation",

@@ -17,6 +17,7 @@ from claude_swap.rules import (
     parse_hard_limit,
     parse_priority,
     parse_swap_limit,
+    split_taper,
 )
 
 
@@ -197,6 +198,7 @@ class RuleForm:
     hard_limit: float | str
     priority: int
     reset: bool = False
+    hard_taper: bool = False  # the hard limit's reserve shrinks with the week left
 
 
 class RuleModal(ModalScreen["RuleForm | None"]):
@@ -240,7 +242,7 @@ class RuleModal(ModalScreen["RuleForm | None"]):
                 "swap limit: start looking for a better account at this % "
                 "(blank = global threshold).\n"
                 "hard limit: never use past this % — not a target, and left "
-                "at once when active (blank = 100).\n"
+                "at once when active (blank = 100; '50 taper' loosens as the week ends).\n"
                 "priority: 1 is most preferred; ties route by usage (blank = 1).",
                 classes="modal-body",
             )
@@ -256,9 +258,11 @@ class RuleModal(ModalScreen["RuleForm | None"]):
                 hard_value = ""
             else:
                 hard_value = f"{rule.hard_limit:.10g}"
+                if rule.hard_taper:
+                    hard_value += " taper"
             yield Input(
                 value=hard_value,
-                placeholder="hard limit: pace, or % (default 100)",
+                placeholder="hard limit: pace, %, or % taper (default 100)",
                 id="hard",
             )
             yield Input(
@@ -291,12 +295,15 @@ class RuleModal(ModalScreen["RuleForm | None"]):
     def _submit(self) -> None:
         try:
             swap = parse_swap_limit(self.query_one("#swap", Input).value)
-            hard = parse_hard_limit(self.query_one("#hard", Input).value)
+            hard_raw, taper = split_taper(self.query_one("#hard", Input).value)
+            hard = parse_hard_limit(hard_raw)
+            if taper and (hard is PACE or hard == 100.0):
+                raise ValueError("taper needs a hard limit below 100 (e.g. 50 taper)")
             priority = parse_priority(self.query_one("#priority", Input).value)
         except ValueError as exc:
             self.query_one("#form-error", Static).update(str(exc))
             return
-        self.dismiss(RuleForm(swap, hard, priority))
+        self.dismiss(RuleForm(swap, hard, priority, hard_taper=taper))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -390,6 +397,7 @@ class PoolShareForm:
     swap_limit: float | None
     hard_limit: float | None
     hard_pace: bool = False  # the hard limit is the share of the week that has passed
+    hard_taper: bool = False  # the hard limit's reserve shrinks with the week left
 
 
 class PoolShareModal(ModalScreen["PoolShareForm | None"]):
@@ -427,6 +435,8 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
             hard_value = ""
         else:
             hard_value = f"{current.hard_limit:.10g}"
+            if current.hard_taper:
+                hard_value += " taper"
         with Vertical(classes="modal-box"):
             yield Label(
                 f"Share account {self._number} · {self._label}",
@@ -437,8 +447,8 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
                 "borrow it.\n"
                 "swap limit: pool members stop routing to it past this % "
                 "(blank = none).\n"
-                "hard limit: % they may not use it past, or 'pace' = never "
-                "ahead of your week (blank = none).",
+                "hard limit: % they may not use past, 'pace', or '50 taper' "
+                "(loosens as your week ends) (blank = none).",
                 classes="modal-body",
             )
             yield Checkbox("Shared with the pool", value=shared, id="shared")
@@ -449,7 +459,7 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
             )
             yield Input(
                 value=hard_value,
-                placeholder="hard limit % (blank = none)",
+                placeholder="hard limit %, or % taper (blank = none)",
                 id="hard",
             )
             yield Static("", id="form-error", classes="form-error")
@@ -473,7 +483,7 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
     def _submit(self) -> None:
         shared = self.query_one("#shared", Checkbox).value
         swap_raw = self.query_one("#swap", Input).value
-        hard_raw = self.query_one("#hard", Input).value
+        hard_raw, hard_taper = split_taper(self.query_one("#hard", Input).value)
         try:
             swap_limit = parse_swap_limit(swap_raw)
             # parse_hard_limit() itself maps blank/"off"/"default"/"none" to
@@ -492,12 +502,14 @@ class PoolShareModal(ModalScreen["PoolShareForm | None"]):
             hard_pace = hard_limit is PACE
             if hard_limit == 100.0 or hard_pace:
                 hard_limit = None
+            if hard_taper and hard_limit is None:
+                raise ValueError("taper needs a hard limit below 100 (e.g. 50 taper)")
         except ValueError as exc:
             self.query_one("#form-error", Static).update(str(exc))
             return
         self.dismiss(
             PoolShareForm(shared=shared, swap_limit=swap_limit, hard_limit=hard_limit,
-                          hard_pace=hard_pace)
+                          hard_pace=hard_pace, hard_taper=hard_taper)
         )
 
     def action_cancel(self) -> None:

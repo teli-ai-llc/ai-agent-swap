@@ -36,6 +36,8 @@ class FakePool:
     base_url: str = "https://fake.supabase.co"
     anon_key: str = "anon-key"
     schema_version: str = "1"
+    #: Migration 0005 (``share_hard_limit_taper`` + its pool_meta flag) has run.
+    taper: bool = False
     jwt_ttl_s: float = 3600.0
     users: dict[str, FakeUser] = field(default_factory=dict)
     accounts: dict[str, dict] = field(default_factory=dict)      # id -> row
@@ -157,7 +159,10 @@ class FakePool:
         if name == "pool_machines":
             return self.machines
         if name == "pool_meta":
-            return {"schema_version": {"key": "schema_version", "value": self.schema_version}}
+            meta = {"schema_version": {"key": "schema_version", "value": self.schema_version}}
+            if self.taper:
+                meta["hard_limit_taper"] = {"key": "hard_limit_taper", "value": "1"}
+            return meta
         if name == "pool_members":
             return {
                 u.user_id: {"user_id": u.user_id, "display_name": u.display_name,
@@ -208,6 +213,11 @@ class FakePool:
             # PostgREST on a pool that predates migration 0004
             return 400, (b'{"code":"PGRST204","message":"Could not find the '
                          b"'share_hard_limit_pace' column of 'pool_accounts' in the schema cache\"}")
+        if method in ("POST", "PATCH") and table == "pool_accounts" \
+                and not self.taper and "share_hard_limit_taper" in payload:
+            # PostgREST on a pool that predates migration 0005
+            return 400, (b'{"code":"PGRST204","message":"Could not find the '
+                         b"'share_hard_limit_taper' column of 'pool_accounts' in the schema cache\"}")
 
         if method == "POST":
             if table == "pool_machines":
@@ -231,6 +241,7 @@ class FakePool:
                 "updated_by_machine_id": None, "status": "ok", "needs_relogin_since": None,
                 "needs_relogin_reported_by": None, "shared": False,
                 "share_swap_limit": None, "share_hard_limit": None, "share_hard_limit_pace": False,
+                **({"share_hard_limit_taper": False} if self.taper else {}),
                 "created_at": _now_iso(),
                 **payload,
                 "updated_by_user_id": user_id, "updated_at": _now_iso(),
@@ -273,7 +284,8 @@ class FakePool:
 
         if not (is_owner or is_admin):
             for col in ("owner_user_id", "shared", "share_swap_limit", "share_hard_limit",
-                        "share_hard_limit_pace", "email", "account_uuid", "organization_uuid"):
+                        "share_hard_limit_pace", "share_hard_limit_taper",
+                        "email", "account_uuid", "organization_uuid"):
                 if new.get(col) != old.get(col):
                     return 403, b'{"code":"42501","message":"pool: only the owner may change sharing or identity"}'
             if new["status"] != old["status"] and not (new["status"] == "needs_relogin" and old["status"] == "ok"):

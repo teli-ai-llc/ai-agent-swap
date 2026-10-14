@@ -7255,3 +7255,33 @@ class TestSmartStrategy:
         now = h.clock.now
         usage = {"1": "token-expired", "2": _usage_in(0, 60, 8, now)}
         assert self._rank(h, usage, "1", no_return=None) == []
+
+    def test_a_tapered_owner_limit_opens_up_late_in_the_week(self, temp_home):
+        """50% taper with 40% of the week left is an 80% cap: an account at
+        65% used still offers 15 points, so it is somewhere to go when the
+        active account runs out (untapered, the same account is spent)."""
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"].update({"hardLimit": 50.0, "hardLimitTaper": True})
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        h.engine = h._make_engine()
+        outcome = h.tick_with_usage({
+            "1": _usage_in(96, 10, 150, now),          # at its 5h limit: must move
+            "2": _usage_in(0, 65, 0.4 * 168, now),     # 15 pts under the taper, 67h left
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_the_same_account_untapered_is_at_its_limit(self, temp_home):
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"].update({"hardLimit": 50.0})
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        h.engine = h._make_engine()
+        outcome = h.tick_with_usage({
+            "1": _usage_in(96, 10, 150, now),
+            "2": _usage_in(0, 65, 0.4 * 168, now),     # past its fixed 50%
+        })
+        assert outcome is not TickOutcome.SWITCHED

@@ -265,7 +265,8 @@ def rule_chips(rule: AccountRule, threshold: float | None, progress: float | Non
 
 
 def _progress_for(acc: AccountSnapshot, now: float) -> float | None:
-    return week_progress(acc.usage.last_good, now) if acc.rule.hard_pace else None
+    tracks_week = acc.rule.hard_pace or acc.rule.hard_taper
+    return week_progress(acc.usage.last_good, now) if tracks_week else None
 
 
 def account_card_text(

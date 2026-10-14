@@ -760,7 +760,7 @@ class AutoSwitchEngine:
         fetch) resolves a slot the first call had no data for. A no-op for
         a fleet without pace-bound rules."""
         raw = getattr(self, "_raw_rules", {})
-        if not any(rule.hard_pace for rule in raw.values()):
+        if not any(rule.hard_pace or rule.hard_taper for rule in raw.values()):
             return
         now = self.clock()
         self._rules = {

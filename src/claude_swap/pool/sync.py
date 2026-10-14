@@ -41,6 +41,7 @@ _logger = logging.getLogger("claude-swap")
 _OWNER_SWAP_KEY = "poolShareSwapLimit"
 _OWNER_HARD_KEY = "poolShareHardLimit"
 _OWNER_PACE_KEY = "poolShareHardPace"
+_OWNER_TAPER_KEY = "poolShareHardTaper"
 _NO_LIMIT = float("inf")
 
 
@@ -79,6 +80,16 @@ def reconcile_owner_pace(current: bool, previous: bool | None, new: bool,
     if previous_known and current == previous:
         return new
     return current or new
+
+
+def reconcile_owner_taper(current: bool, previous: bool | None, new: bool,
+                          *, previous_known: bool) -> bool:
+    """The taper flag's twin of ``reconcile_owner_pace``, mirrored: off is
+    the stricter state (a fixed limit). Untouched by the borrower -> follow
+    the owner either way; otherwise on only if both sides have it on."""
+    if previous_known and current == previous:
+        return new
+    return current and new
 
 
 @dataclass
@@ -382,19 +393,26 @@ class PoolSync:
             # none to remember, so "untouched" is a borrower still at off.
             pace = reconcile_owner_pace(rule.hard_pace, record.get(_OWNER_PACE_KEY, False),
                                         row.share_hard_limit_pace, previous_known=known)
+            # A record from before migration 0005 remembers no taper: the
+            # owner had none, so "untouched" is a borrower still at off.
+            taper = reconcile_owner_taper(rule.hard_taper, record.get(_OWNER_TAPER_KEY, False),
+                                          row.share_hard_limit_taper, previous_known=known)
             unchanged = (
                 known and swap == rule.swap_limit and hard == current_hard and pace == rule.hard_pace
+                and taper == rule.hard_taper
                 and record.get(_OWNER_SWAP_KEY) == row.share_swap_limit
                 and record.get(_OWNER_HARD_KEY) == row.share_hard_limit
                 and record.get(_OWNER_PACE_KEY, False) == row.share_hard_limit_pace
+                and record.get(_OWNER_TAPER_KEY, False) == row.share_hard_limit_taper
             )
             if unchanged:
                 return
             apply_rule(record, swap_limit=swap, hard_limit=100.0 if hard is None else hard,
-                       hard_pace=pace)
+                       hard_pace=pace, hard_taper=taper and not pace)
             record[_OWNER_SWAP_KEY] = row.share_swap_limit
             record[_OWNER_HARD_KEY] = row.share_hard_limit
             record[_OWNER_PACE_KEY] = row.share_hard_limit_pace
+            record[_OWNER_TAPER_KEY] = row.share_hard_limit_taper
             data["lastUpdated"] = get_timestamp()
             self.switcher._write_json(self.switcher.sequence_file, data)
 
@@ -436,10 +454,12 @@ class PoolSync:
             if not mine:
                 apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
                            hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0,
-                           hard_pace=row.share_hard_limit_pace)
+                           hard_pace=row.share_hard_limit_pace,
+                           hard_taper=row.share_hard_limit_taper and not row.share_hard_limit_pace)
                 record[_OWNER_SWAP_KEY] = row.share_swap_limit
                 record[_OWNER_HARD_KEY] = row.share_hard_limit
                 record[_OWNER_PACE_KEY] = row.share_hard_limit_pace
+                record[_OWNER_TAPER_KEY] = row.share_hard_limit_taper
             data.setdefault("accounts", {})[num] = record
             if int(num) not in data.setdefault("sequence", []):
                 data["sequence"].append(int(num))
@@ -484,7 +504,8 @@ class PoolSync:
 
     # -- sharing (Task 11) ---------------------------------------------------------
     def publish_slot(self, num: str, *, shared: bool, swap_limit: float | None,
-                     hard_limit: float | None, hard_pace: bool = False) -> PoolAccountRow:
+                     hard_limit: float | None, hard_pace: bool = False,
+                     hard_taper: bool = False) -> PoolAccountRow:
         data = self.switcher._get_sequence_data() or {}
         record = (data.get("accounts") or {}).get(num)
         if record is None:
@@ -510,6 +531,22 @@ class PoolSync:
             )
         else:
             pace_column = None
+        # The taper column exists once migration 0005 has run (a feature
+        # flag, not a schema version: see PoolClient.supports_taper). Same
+        # shape as pace: unsent where it does not exist, refused by name.
+        if hard_taper and hard_pace:
+            raise PoolError("a hard limit is either pace or taper, not both")
+        if hard_taper and hard_limit is None:
+            raise PoolError("taper needs a hard limit to taper from (e.g. --hard-limit 50 --taper)")
+        if self.client.supports_taper(self.session):
+            taper_column: bool | None = hard_taper
+        elif hard_taper:
+            raise PoolError(
+                "this pool has no taper column yet; a tapered hard limit needs migration "
+                "0005 (supabase/migrations/0005_pool_taper_limit.sql) applied by the pool admin"
+            )
+        else:
+            taper_column = None
 
         row = self.client.find_account(self.session, account_uuid, org_uuid)
         if row is None:
@@ -524,6 +561,8 @@ class PoolSync:
             }
             if pace_column is not None:
                 body["share_hard_limit_pace"] = pace_column
+            if taper_column is not None:
+                body["share_hard_limit_taper"] = taper_column
             try:
                 row = self.client.create_account(self.session, body)
             except PoolAuthError:
@@ -545,7 +584,7 @@ class PoolSync:
         else:
             self.client.update_sharing(self.session, row.id, shared=shared,
                                        swap_limit=swap_limit, hard_limit=hard_limit,
-                                       hard_pace=pace_column)
+                                       hard_pace=pace_column, hard_taper=taper_column)
             if row.status != "ok":
                 self.client.set_status(self.session, row.id, "ok", self.machine_id)
             self.client.push_credential(self.session, row.id, blob, blob_version(blob),

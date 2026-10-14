@@ -456,6 +456,7 @@ class CswapApp(App):
                 number,
                 swap_limit=form.swap_limit,
                 hard_limit=form.hard_limit,
+                hard_taper=form.hard_taper,
                 priority=form.priority,
             )
         self._start_action(f"Rules for account {number}", fn)
@@ -558,6 +559,7 @@ class CswapApp(App):
                             swap_limit=row.share_swap_limit,
                             hard_limit=row.share_hard_limit,
                             hard_pace=row.share_hard_limit_pace,
+                            hard_taper=row.share_hard_limit_taper,
                         )
         except Exception:
             current = None
@@ -589,6 +591,7 @@ class CswapApp(App):
                 swap_limit=form.swap_limit,
                 hard_limit=form.hard_limit,
                 hard_pace=form.hard_pace,
+                hard_taper=form.hard_taper,
             )
             print(
                 f"{'Shared' if row.shared else 'Published (private)'} {row.email}"

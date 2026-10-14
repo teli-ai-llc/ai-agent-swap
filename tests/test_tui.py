@@ -1818,7 +1818,7 @@ class TestAccountRulesUI:
             await pilot.press("enter")
             await settle(pilot)
             assert saved == [
-                ("2", {"swap_limit": 95.0, "hard_limit": 50.0, "priority": 2})
+                ("2", {"swap_limit": 95.0, "hard_limit": 50.0, "hard_taper": False, "priority": 2})
             ]
 
     async def test_rule_editor_accepts_pace_as_the_hard_limit(self, tmp_path):
@@ -1840,7 +1840,7 @@ class TestAccountRulesUI:
             await pilot.press("enter")
             await settle(pilot)
             assert saved == [
-                ("2", {"swap_limit": None, "hard_limit": PACE, "priority": 1})
+                ("2", {"swap_limit": None, "hard_limit": PACE, "hard_taper": False, "priority": 1})
             ]
 
     async def test_rule_editor_rejects_bad_input_and_defaults_button_resets(self, tmp_path):
