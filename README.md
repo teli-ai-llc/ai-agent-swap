@@ -472,7 +472,7 @@ Use the arrow keys to select an account, **Enter** or **s** to switch, **/** to 
 
 To remove a local account, select it and press **Delete**, or choose **Remove selected account locally** under **m → Actions**, then confirm. A pooled account remains in the pool and can return after a pool update. For an account you own, **Withdraw account from shared pool** removes it from syncing for everyone; you can then remove its local copy. Accounts owned by teammates can only be withdrawn by their owner.
 
-The macOS embedded menu bar panel retains its card/menu layout (`cswap config set ui.inactiveCards mini` collapses its inactive cards). In the auto-switch view, `t` sets the threshold, `m` cycles the per-model limit (off → Fable → all), and `l` goes live; all three are saved, so the view reopens the way you left it. The engine in that view runs only while the view is open — for always-on switching use `cswap auto` or the menu bar.
+The macOS menu bar panel shows this same account table. In the auto-switch view, `t` sets the threshold, `m` cycles the per-model limit (off → Fable → all), and `l` goes live; all three are saved, so the view reopens the way you left it. The engine in that view runs only while the view is open — for always-on switching use `cswap auto` or the menu bar.
 
 For a compact CLI roster, use `cswap list --compact`. Add `--scope mine` or `--scope shared` to filter by ownership/sharing, and `--search TEXT` to find an account. These filters also work with `--json`; filtered JSON rows include `ownership` (`mine` / `team`) and `sharing` (`private` / `shared` / `unknown`). The unfiltered JSON contract remains unchanged.
 
@@ -605,7 +605,7 @@ cswap panel --uninstall-service    # remove it from the menu bar and from login
 cswap panel                        # run it in the foreground instead (dies with the terminal)
 ```
 
-- **Sizing.** The panel grows with your accounts up to three full cards; past that the accounts section scrolls (mouse wheel) so the menu never leaves the screen. It re-measures every time you open it, so accounts added later are picked up.
+- **Sizing.** The panel shows the same account table as `cswap` in a terminal, one row per account up to 14 (past that the table scrolls), with the selected account's bars below. It re-measures every time you open it, so accounts added later are picked up.
 - **Build.** The panel is a small Swift app (`src/claude_swap/panel/`) compiled on your machine into the backup root (`~/.claude-swap-backup/panel/`) — never into site-packages — and rebuilt only when its sources or the cswap version change. It needs the Xcode Command Line Tools: `xcode-select --install`. The first build fetches SwiftTerm from GitHub.
 - **launchd.** The agent is `~/Library/LaunchAgents/com.cswap.panel.plist`, logging to `~/Library/Logs/com.cswap.panel.{log,err}`. After `cswap upgrade`, re-run `--install-service` to rebuild for the new version.
 - **Menu bar vs. menu bar panel.** This panel shows the *dashboard*. The older [`cswap menubar`](#menu-bar-macos) below is a native drop-down *menu* (usage lines, click-to-switch) — lighter, no build step, but not the TUI. Run either or both.
