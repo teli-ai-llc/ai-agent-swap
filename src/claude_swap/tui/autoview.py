@@ -34,6 +34,7 @@ from claude_swap.autoswitch import (
     binding_pct,
     pct_label,
 )
+from claude_swap import recommend
 from claude_swap.exceptions import ConfigError
 from claude_swap.models import AccountsSnapshot
 from claude_swap.rules import resolve_rule
@@ -391,53 +392,76 @@ class AutoScreen(Screen):
     def _candidates_text(
         self, snap: AccountsSnapshot, active_number: str | None
     ) -> Text:
-        """Switch targets ranked by remaining headroom (best first)."""
-        # Same window set as the engine (autoswitch.model included), so the
-        # displayed ranking can never disagree with the account it picks.
+        """Switch targets in the order the engine would take them, best first.
+
+        Same strategy and window set as the engine (recommend.py), so the ★
+        is the account it would pick; each row says why: the room left and
+        when that week resets, or when a blocked account is back.
+        """
         palette = Palette.from_theme(self.app.current_theme)
         models = parse_model_names(self._settings.model) if self._settings else ()
-        # (priority, pct used) — the same order the engine ranks in: a
-        # more-preferred slot first, usage within a tier, capped/unknown last.
-        ranked: list[tuple[tuple[int, float], str]] = []
-        lines: dict[str, Text] = {}
-        for acc in snap.accounts:
-            if acc.number == active_number or not acc.switchable:
-                continue
-            pct = binding_pct(acc.usage.last_good, models)
-            # A pace-bound hard limit is the week's progress right now, the
-            # same number the engine decides with this tick.
-            rule = resolve_rule(acc.rule, acc.usage.last_good, time.time())
+        strategy = self._settings.strategy if self._settings else "best"
+        now = time.time()
+        rows = [
+            acc for acc in snap.accounts
+            if acc.number != active_number and acc.switchable
+        ]
+        text = Text()
+        text.append("Next best", style=palette.muted)
+        text.append(
+            "  " + {
+                "smart": "quota that expires first",
+                "consume-first": "soonest weekly reset",
+            }.get(strategy, "most room left"),
+            style=palette.track,
+        )
+        if not rows:
+            text.append("\n  no other switchable accounts", style=palette.muted)
+            return text
+        accounts = {
+            acc.number: (
+                None if acc.usage.sentinel else acc.usage.last_good,
+                resolve_rule(acc.rule, acc.usage.last_good, now),
+            )
+            for acc in rows
+        }
+        ranked = recommend.rank(accounts, models, now, strategy=strategy)
+        by_number = {acc.number: acc for acc in rows}
+        top = ranked[0][0] if ranked and ranked[0][1].usable else None
+        for number, outlook in ranked:
+            acc = by_number[number]
+            rule = accounts[number][1]
             entry = Text()
-            entry.append(f"\n  {acc.number:>2}  ", style=palette.foreground)
+            if number == top:
+                entry.append("\n  ★ ", style=f"bold {palette.sev_ok}")
+            else:
+                entry.append("\n    ")
+            entry.append(f"{acc.number:>2}  ", style=palette.foreground)
             entry.append(acc.email, style=palette.foreground)
+            pct = binding_pct(accounts[number][0], models)
             if acc.usage.sentinel is not None:
                 entry.append(
                     f"  {data.sentinel_label(acc.usage.sentinel)}", style=palette.muted
                 )
-                ranked.append(((rule.priority, 998.0), acc.number))
             elif pct is None:
                 entry.append("  usage unknown", style=palette.muted)
-                ranked.append(((rule.priority, 999.0), acc.number))
-            elif rule.hard_limit < 100.0 and pct >= rule.hard_limit:
-                # Only the slot's OWN cap is called a hard limit; an account
-                # at the provider's 100% reads as plain usage, like before.
-                entry.append(
-                    f"  {pct:3.0f}% used · at hard limit {rule.hard_limit:.10g}%",
-                    style=palette.sev_crit,
-                )
-                ranked.append(((rule.priority, 997.0), acc.number))
             else:
-                entry.append(f"  {pct:3.0f}% used", style=palette.severity(pct))
-                ranked.append(((rule.priority, pct), acc.number))
+                if rule.hard_limit < 100.0 and pct >= rule.hard_limit:
+                    # Only the slot's OWN cap is called a hard limit.
+                    entry.append(
+                        f"  {pct:3.0f}% used · at hard limit {rule.hard_limit:.10g}%",
+                        style=palette.sev_crit,
+                    )
+                else:
+                    entry.append(f"  {pct:3.0f}% used", style=palette.severity(pct))
+                entry.append(
+                    f"  {recommend.reason(outlook, now)}",
+                    style=palette.sev_ok if number == top else palette.muted,
+                )
             if rule.priority != 1:
                 entry.append(f"  p{rule.priority}", style=palette.muted)
-            lines[acc.number] = entry
-
-        text = Text()
-        text.append("Next best", style=palette.muted)
-        if not ranked:
-            text.append("\n  no other switchable accounts", style=palette.muted)
-            return text
+            text.append(entry)
+        return text
         for _key, number in sorted(ranked):
             text.append(lines[number])
         return text

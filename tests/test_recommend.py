@@ -56,10 +56,17 @@ class TestProjectResets:
         projected, rolled = recommend.project_resets(usage, NOW)
         assert rolled
         assert projected["five_hour"]["pct"] == 0.0
-        new_ts = datetime.fromisoformat(projected["five_hour"]["resets_at"]).timestamp()
-        assert new_ts == NOW + 4.5 * H
+        # the next 5h window starts with the next message: no known reset
+        assert "resets_at" not in projected["five_hour"]
         assert projected["seven_day"] == usage["seven_day"]
         assert usage["five_hour"]["pct"] == 92  # input untouched
+
+    def test_a_passed_weekly_window_rolls_forward_a_week(self):
+        usage = _u(0, 80, -24)
+        projected, rolled = recommend.project_resets(usage, NOW)
+        assert rolled and projected["seven_day"]["pct"] == 0.0
+        new_ts = datetime.fromisoformat(projected["seven_day"]["resets_at"]).timestamp()
+        assert new_ts == NOW + 6 * 24 * H
 
     def test_future_windows_are_untouched(self):
         usage = _u(50, 40, 30, hours5=2)
@@ -120,6 +127,10 @@ class TestText:
     def test_reason(self):
         o = recommend.outlook(_u(0, 38, 28), None, (), NOW)
         assert recommend.reason(o, NOW) == "62% left this week · resets in 1d 4h"
+
+    def test_reason_names_the_owners_cap(self):
+        o = recommend.outlook(_u(0, 45, 30), AccountRule(hard_limit=50.0), (), NOW)
+        assert recommend.reason(o, NOW) == "owner cap · back in 1d 6h"
 
     def test_reason_for_a_blocked_account_says_when_it_returns(self):
         o = recommend.outlook(_u(97, 10, 100, hours5=2), None, (), NOW)

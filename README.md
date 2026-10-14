@@ -233,7 +233,7 @@ cswap rule 2 --reset                         # back to defaults
 cswap config                                 # show all settings
 cswap config set autoswitch.threshold 80     # switch earlier (default 90)
 cswap config set autoswitch.model Fable      # also switch on the Fable weekly limit
-cswap config set autoswitch.strategy consume-first   # burn soonest-resetting quota first
+cswap config set autoswitch.strategy smart   # use quota that would expire first
 ```
 
 **Rest an account without removing it.**
@@ -368,6 +368,7 @@ cswap auto --model Fable       # also switch when the Fable weekly limit is hit
 cswap auto --once              # single check-and-switch, for cron/scripts
 cswap auto --dry-run           # log what it would do, never switch
 cswap auto --strategy consume-first   # burn the soonest-resetting account first
+cswap auto --strategy smart           # burn the quota that would otherwise go to waste first
 ```
 
 <details>
@@ -375,7 +376,7 @@ cswap auto --strategy consume-first   # burn the soonest-resetting account first
 
 - Runs safely alongside Claude Code: switches take the same credential locks Claude Code uses, so a swap never collides with a token refresh.
 - A cooldown (default 5 min) and a hysteresis margin stop it flip-flopping near the threshold: a proactive switch only lands on an account that's below the threshold *and* better than the current one by the margin — a candidate that clears the margin is always taken, but two accounts hovering at the line never ping-pong. When every account is exhausted it keeps checking on a bounded slow cadence, waking sooner for an imminent reset.
-- **Strategies** (`--strategy`, or `cswap config set autoswitch.strategy`): `best` (default) stays put until the active account nears its limit, then moves to the account with the most quota left. `consume-first` proactively keeps you on the account whose **weekly window resets soonest** — use-it-or-lose-it — switching to a sooner-resetting account (with room to spare) even below the threshold, so perishable weekly quota isn't wasted.
+- **Strategies** (`--strategy`, or `cswap config set autoswitch.strategy`): `best` (default) stays put until the active account nears its limit, then moves to the account with the most quota left. `consume-first` proactively keeps you on the account whose **weekly window resets soonest** — use-it-or-lose-it — switching to a sooner-resetting account (with room to spare) even below the threshold, so perishable weekly quota isn't wasted. `smart` weighs **how much** is left as well as **when** it resets: it ranks accounts by the weekly room left divided by the hours until that week resets (the burn rate you'd need to use it all). 40% left that expires in 8 hours beats 45% left for 6 days, and a fresh week is saved for later. It never lands on an account with under 10% left on its tightest window (so not one about to hit its 5-hour limit), counts a shared account only up to its owner's hard limit, and below the threshold moves only when the target is clearly more perishable (1.5x the active account's rate, and at least 0.25 %/h more), behind the usual cooldown and no-return guard. `cswap switch --strategy best` and every "best pick" in the UI follow the configured strategy.
 - Usage polling is adaptive — a couple of accounts per check, busy alternates watched more closely, and exhausted ones checked about every ten minutes (or slower after 429s) — so API traffic stays flat no matter how many accounts you manage.
 - It fails safe: if a usage check errors it keeps trusting the last-known numbers while retries back off, and an expired token on an idle machine makes it hold rather than fail over (Claude Code refreshes the token on your next message).
 - An account whose refresh token has died is quarantined and reported until you either log in with it and re-run `cswap add --slot N`, or replace its stored credentials from a known-good export — a plain `cswap import backup.cswap` replaces dead-token slots on its own (`--force` is still required to replace other existing accounts; note a stale export can carry an already-superseded token). API-key accounts are never rotated onto unless you pass `--include-api-key-accounts`.
@@ -463,7 +464,11 @@ Run `cswap` on its own (or `cswap tui`) for the full-screen dashboard: live usag
 
 The terminal dashboard uses a searchable table, with one row per account and full usage details for the selected row. **Your accounts** includes local accounts and accounts you own in the pool. **Shared accounts** includes accounts available to the team, including your own shared accounts. An account you own can appear in both filters; private accounts synced across your machines remain in **Your accounts**.
 
-Use the arrow keys to select an account, **Enter** or **s** to switch, **/** to search, and **m** for actions on the selected account. Sharing is integrated here: manage sharing on your own accounts, or open **Sharing connection & sync** to connect, view status, sync, or disconnect. Shared accounts belonging to someone else do not offer owner sharing controls. Full reset times and per-model quotas live in the selected account's detail area, so a large roster stays compact. An asterisk beside a table percentage marks cached usage that is due for refresh.
+Use the arrow keys to select an account, **Enter** or **s** to switch, **/** to search, and **m** for actions on the selected account. Sharing is integrated here: manage sharing on your own accounts, or open **Sharing connection & sync** to connect, view status, sync, or disconnect. Shared accounts belonging to someone else do not offer owner sharing controls. Each usage cell shows how much is used and how long until that window resets (`47% · 2h 13m`); full reset times and per-model quotas live in the selected account's detail area. An asterisk beside a percentage marks a reading older than five minutes (inactive accounts are polled every 5–10 minutes) — still the best number known, shown for reference. A window whose reset time has passed reads `0% · just reset` until the next check confirms it.
+
+**★ Best pick.** The account auto-switch would choose right now, under your configured strategy, is starred in the table, the cards, `cswap list`, `cswap list --compact`, the auto-switch view's *Next best* list and the menu bar, with the reason (`62% left this week · resets in 1d 4h`). Accounts that cannot be picked say why and when they're back (`5h limit · back in 22m`, `owner cap · back in 1d 9h`). The menu bar's *Switch to best* names its target before you click it.
+
+**Reading the bars.** Every bar carries a white `│` at the share of its window that has already gone by: fill past that mark means the account is being used faster than an even pace. The yellow `┃` is the auto-switch point and the red `┃` an owner's hard limit.
 
 To remove a local account, select it and press **Delete**, or choose **Remove selected account locally** under **m → Actions**, then confirm. A pooled account remains in the pool and can return after a pool update. For an account you own, **Withdraw account from shared pool** removes it from syncing for everyone; you can then remove its local copy. Accounts owned by teammates can only be withdrawn by their owner.
 

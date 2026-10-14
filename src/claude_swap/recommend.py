@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from claude_swap import oauth
 from claude_swap.poll_policy import parse_reset_ts
-from claude_swap.rules import AccountRule
+from claude_swap.rules import AccountRule, resolve_rule
 
 FIVE_HOUR_S = 5 * 3600.0
 WEEK_S = 7 * 86400.0
@@ -47,43 +47,45 @@ MIN_URGENCY_GAIN = 0.25
 MIN_HOURS = 1.0
 
 
-def _window_period_s(key: str) -> float:
-    return FIVE_HOUR_S if key == "five_hour" else WEEK_S
-
-
 def project_resets(usage: dict | None, now: float) -> tuple[dict | None, bool]:
     """``usage`` with every window whose reset has passed rolled forward.
 
     A cached reading can outlive its own window: a 5-hour window that reset
     20 minutes ago still says 92% until the next fetch. The usage API resets
-    a window to 0% at ``resets_at``, so a passed window is projected to 0%
-    with its ``resets_at`` moved forward by whole periods. Returns
-    ``(projected, any_rolled)``; the input is never mutated.
+    a window to 0% at ``resets_at``, so a passed window is projected to 0%,
+    marked ``rolled``. Weekly windows keep a fixed cadence, so their
+    ``resets_at`` moves forward by whole weeks; a 5-hour window only starts
+    again with the next message, so its next reset is unknown and dropped.
+    Returns ``(projected, any_rolled)``; the input is never mutated.
     """
     if not isinstance(usage, dict):
         return usage, False
     rolled = False
 
-    def roll(window: object, period_s: float) -> object:
+    def roll(window: object, period_s: float | None) -> object:
         nonlocal rolled
         if not isinstance(window, dict):
             return window
         ts = parse_reset_ts(window.get("resets_at"))
         if ts is None or ts > now:
             return window
-        cycles = int((now - ts) // period_s) + 1
         rolled = True
-        new_ts = ts + cycles * period_s
-        out = {k: v for k, v in window.items() if k not in ("countdown", "clock")}
+        out = {
+            k: v for k, v in window.items()
+            if k not in ("countdown", "clock", "resets_at")
+        }
         out["pct"] = 0.0
-        out["resets_at"] = datetime.fromtimestamp(new_ts, tz=timezone.utc).isoformat()
         out["rolled"] = True
+        if period_s is not None:
+            new_ts = ts + (int((now - ts) // period_s) + 1) * period_s
+            out["resets_at"] = datetime.fromtimestamp(new_ts, tz=timezone.utc).isoformat()
         return out
 
     projected = dict(usage)
-    for key in ("five_hour", "seven_day"):
-        if key in projected:
-            projected[key] = roll(projected[key], _window_period_s(key))
+    if "five_hour" in projected:
+        projected["five_hour"] = roll(projected["five_hour"], None)
+    if "seven_day" in projected:
+        projected["seven_day"] = roll(projected["seven_day"], WEEK_S)
     scoped = projected.get("scoped")
     if isinstance(scoped, list):
         projected["scoped"] = [roll(s, WEEK_S) for s in scoped]
@@ -100,6 +102,7 @@ class Outlook:
     urgency: float | None  # weekly_room / hours to weekly reset, %/h
     binding_label: str | None  # "5h", "7d" or a model name
     binding_reset_ts: float | None
+    capped: bool = False  # held back by the owner's hard limit, not the provider's
 
     @property
     def usable(self) -> bool:
@@ -148,18 +151,23 @@ def outlook(
         urgency=urgency,
         binding_label=label,
         binding_reset_ts=parse_reset_ts(resets_at),
+        capped=cap > 0 and headroom < MIN_LANDING_HEADROOM_PCT <= 100.0 - pct,
     )
 
 
-def sort_key(o: Outlook, priority: int = 0) -> tuple:
-    """Ascending sort key: usable first, then rule priority, then the most
-    perishable quota, then the most headroom."""
-    return (
-        0 if o.usable else 1,
-        priority,
-        -(o.urgency or 0.0),
-        -(o.headroom if o.headroom is not None else -1e9),
-    )
+def sort_key(o: Outlook, priority: int = 0, strategy: str = "smart") -> tuple:
+    """Ascending sort key: usable first, then rule priority, then the
+    strategy's order — the most perishable quota (``smart``), the soonest
+    weekly reset (``consume-first``) or the most headroom (``best``) — with
+    the most headroom breaking ties."""
+    headroom = -(o.headroom if o.headroom is not None else -1e9)
+    if strategy == "best":
+        order: float = headroom
+    elif strategy == "consume-first":
+        order = o.weekly_reset_ts if o.weekly_reset_ts is not None else float("inf")
+    else:
+        order = -(o.urgency or 0.0)
+    return (0 if o.usable else 1, priority, order, headroom)
 
 
 def beats(candidate: Outlook, active: Outlook) -> bool:
@@ -178,6 +186,7 @@ def rank(
     models: Sequence[str],
     now: float,
     exclude: Iterable[str] = (),
+    strategy: str = "smart",
 ) -> list[tuple[str, Outlook]]:
     """Every account, best pick first. ``accounts`` maps number →
     ``(usage, rule)``. Unreadable accounts sort last."""
@@ -187,7 +196,7 @@ def rank(
         for num, (usage, rule) in accounts.items()
         if num not in skip
     ]
-    scored.sort(key=lambda t: sort_key(t[1], t[2]))
+    scored.sort(key=lambda t: sort_key(t[1], t[2], strategy))
     return [(num, o) for num, o, _ in scored]
 
 
@@ -196,12 +205,43 @@ def best(
     models: Sequence[str],
     now: float,
     exclude: Iterable[str] = (),
+    strategy: str = "smart",
 ) -> tuple[str, Outlook] | None:
     """The recommended account, or None when nothing is usable."""
-    ranked = rank(accounts, models, now, exclude)
+    ranked = rank(accounts, models, now, exclude, strategy)
     if ranked and ranked[0][1].usable:
         return ranked[0]
     return None
+
+
+def snapshot_pick(
+    accounts: Iterable,
+    models: Sequence[str],
+    now: float,
+    strategy: str = "smart",
+) -> tuple[str | None, dict[str, Outlook]]:
+    """``(best pick, every account's outlook)`` for a UI snapshot.
+
+    ``accounts`` are :class:`~claude_swap.models.AccountSnapshot` rows. Only
+    accounts in rotation (OAuth, switchable, not disabled, readable usage)
+    can be the pick; every account gets an outlook for display. Uses the last
+    good reading even when it is old: the UI marks staleness itself.
+    """
+    outlooks: dict[str, Outlook] = {}
+    eligible: dict[str, tuple[dict | None, AccountRule]] = {}
+    for acc in accounts:
+        usage = None if acc.usage.sentinel else acc.usage.last_good
+        rule = resolve_rule(acc.rule, usage, now)
+        outlooks[acc.number] = outlook(usage, rule, models, now)
+        if (
+            acc.kind == "oauth"
+            and acc.switchable
+            and not acc.disabled
+            and isinstance(usage, dict)
+        ):
+            eligible[acc.number] = (usage, rule)
+    pick = best(eligible, models, now, strategy=strategy)
+    return (pick[0] if pick else None), outlooks
 
 
 def format_duration(seconds: float) -> str:
@@ -223,12 +263,10 @@ def reason(o: Outlook, now: float) -> str:
     if o.headroom is None:
         return "usage unknown"
     if not o.usable:
+        limit = "owner cap" if o.capped else f"{o.binding_label} limit"
         if o.binding_reset_ts is not None and o.binding_reset_ts > now:
-            return (
-                f"{o.binding_label} limit · back in "
-                f"{format_duration(o.binding_reset_ts - now)}"
-            )
-        return f"{o.binding_label} limit"
+            return f"{limit} · back in {format_duration(o.binding_reset_ts - now)}"
+        return limit
     parts = []
     if o.weekly_room is not None:
         parts.append(f"{o.weekly_room:.0f}% left this week")

@@ -1702,6 +1702,14 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                     payload, (switcher._get_sequence_data() or {}).get("accounts", {}),
                     scope=args.scope or "all", search=args.search or "",
                 )
+                from claude_swap import recommend
+                picked, outlooks = switcher.best_pick()
+                if picked is not None:
+                    payload["bestPick"] = {
+                        "number": int(picked),
+                        "email": switcher.account_email(picked),
+                        "reason": recommend.reason(outlooks[picked], time.time()),
+                    }
                 if not args.json:
                     print_catalog(payload)
                     payload = None

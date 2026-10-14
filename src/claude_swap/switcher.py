@@ -137,6 +137,9 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
     # Collect (label, body) rows first, then pad every label to the widest one so
     # per-model names (e.g. "Fable") don't shift the columns of the other lines.
     rows: list[tuple[str, str]] = []
+    # A window whose reset already passed is back at 0% (recommend.py): say
+    # so instead of the old pct with "in 0m".
+    usage, _ = recommend.project_resets(usage, time.time())
     spend = usage.get("spend")
     if spend:
         used = spend["used"]
@@ -151,7 +154,9 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
         if w:
             # Pace only applies to the weekly (7d) window, never 5h (issue #125).
             marker = _pace_marker(w, fetched_at) if label == "7d" else ""
-            cell = oauth.fresh_reset_strings(w)
+            if w.get("rolled"):
+                marker = "  (just reset)"
+            cell = oauth.fresh_reset_strings(w) if w.get("resets_at") or not w.get("rolled") else None
             if cell:
                 countdown, clock = cell
                 rows.append((label, f"{w['pct']:>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
@@ -161,6 +166,8 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
         # Per-model weekly limits (e.g. Fable). Flag ones at/over the limit so a
         # maxed model — the usual reason to switch — stands out.
         marker = "  (!)" if w["pct"] >= 100 else _pace_marker(w, fetched_at)
+        if w.get("rolled"):
+            marker = "  (just reset)"
         cell = oauth.fresh_reset_strings(w)
         if cell:
             countdown, clock = cell
@@ -1854,25 +1861,42 @@ class ClaudeAccountSwitcher:
         except Exception:  # noqa: BLE001 - display/ranking must never fail here
             return "best"
 
-    def recommendation(
-        self, usage: dict[str, dict | str | None] | None = None
-    ) -> list[tuple[str, recommend.Outlook]]:
-        """Every switchable account ranked best-pick first (recommend.py),
-        on each slot's own capped scale and the configured models. Pure
-        read: uses the stored usage unless ``usage`` is given."""
-        if usage is None:
-            usage = self._usage_by_account()
+    def best_pick(
+        self,
+        accounts_info: list | None = None,
+        entries: dict[str, UsageEntry] | None = None,
+    ) -> tuple[str | None, dict[str, recommend.Outlook]]:
+        """``(best pick, every account's outlook)`` under the configured
+        strategy and models (recommend.py) — the ★ the list views show.
+
+        Reads the stored usage (no fetch) unless ``entries`` is given. Only
+        accounts in rotation can be the pick: switchable, not disabled, OAuth,
+        with a readable last measurement.
+        """
+        accounts_info = accounts_info or self._build_accounts_info()
+        if entries is None:
+            entries = self._collect_usage_entries(accounts_info, fetch=set())
+        data = self._get_sequence_data() or {}
         _, models = self._poll_policy_inputs()
         now = self._usage_store.clock()
-        rules = {
-            num: resolve_rule(rule, usage.get(num), now)
-            for num, rule in self.account_rules().items()
-        }
-        accounts = {
-            num: (usage.get(num), rules.get(num))
-            for num in self.switchable_account_numbers()
-        }
-        return recommend.rank(accounts, models, now)
+        rules = self.account_rules()
+        outlooks: dict[str, recommend.Outlook] = {}
+        eligible: dict[str, tuple[dict, AccountRule]] = {}
+        for info in accounts_info:
+            num = str(info[0])
+            entry = entries.get(num)
+            usage = None if entry is None or entry.sentinel else entry.last_good
+            rule = resolve_rule(rules.get(num, AccountRule()), usage, now)
+            outlooks[num] = recommend.outlook(usage, rule, models, now)
+            if (
+                isinstance(usage, dict)
+                and self._account_is_switchable(num)
+                and not self._disabled_from_data(data, num)
+                and self.account_kind_for(num) != "api_key"
+            ):
+                eligible[num] = (usage, rule)
+        pick = recommend.best(eligible, models, now, strategy=self.routing_strategy())
+        return (pick[0] if pick else None), outlooks
 
     def switchable_account_numbers(self) -> list[str]:
         """Account numbers in rotation order eligible for automatic selection.
@@ -5773,6 +5797,7 @@ class ClaudeAccountSwitcher:
             return self._build_list_payload(accounts_info, entries)
 
         seq_data = self._get_sequence_data() or {}
+        picked, outlooks = self.best_pick(accounts_info, entries)
         print(bolded("Accounts:"))
         for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
@@ -5782,9 +5807,14 @@ class ClaudeAccountSwitcher:
                 markers += f" {bold_accent('(active)')}"
             if self._disabled_from_data(seq_data, str(num)):
                 markers += f" {muted('(disabled)')}"
+            if str(num) == picked:
+                markers += f" {bold_accent('★ best pick')}"
             print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
+            if str(num) == picked:
+                reason = recommend.reason(outlooks[str(num)], self._usage_store.clock())
+                print(f"     {accent('★ ' + reason)}")
             rule = rule_from_record(seq_data.get("accounts", {}).get(str(num)))
             if not rule.is_default:
                 # `hard pace (61%)`: the week's progress from the usage just

@@ -12,11 +12,13 @@ import datetime as _dt
 import json
 import plistlib
 import sys
+from unittest.mock import patch
 from pathlib import Path
 
 import pytest
 
 from claude_swap import menubar
+from claude_swap.rules import AccountRule
 from claude_swap.exceptions import ClaudeSwitchError
 from claude_swap.switcher import USAGE_API_KEY
 
@@ -160,7 +162,7 @@ def test_usage_summary_scoped_multiple_and_countdown():
             {"name": "Opus", "pct": 55.0},
         ],
     }
-    assert menubar.usage_summary(usage, _NOW) == "Fable 4% (2h 0m) · Opus 55%"
+    assert menubar.usage_summary(usage, _NOW) == "Fable 4% (resets in 2h 0m) · Opus 55%"
 
 
 def test_usage_summary_string_sentinel_passthrough():
@@ -175,7 +177,7 @@ def test_usage_summary_seven_day_ahead_of_pace_marker():
     # 1 day elapsed of the week, 50% used -> far ahead of the ~14% expected.
     usage = {"seven_day": {"pct": 50.0, "resets_at": _iso(6 * 86400)}}
     out = menubar.usage_summary(usage, _NOW, fetched_at=_NOW)
-    assert out == "7d 50% (ahead) (6d 0h)"
+    assert out == "7d 50% (resets in 6d 0h, ahead of pace)"
 
 
 def test_usage_summary_five_hour_never_shows_pace_marker():
@@ -187,7 +189,7 @@ def test_usage_summary_five_hour_never_shows_pace_marker():
 def test_usage_summary_scoped_ahead_of_pace_marker():
     usage = {"scoped": [{"name": "Fable", "pct": 50.0, "resets_at": _iso(6 * 86400)}]}
     out = menubar.usage_summary(usage, _NOW, fetched_at=_NOW)
-    assert out == "Fable 50% (ahead) (6d 0h)"
+    assert out == "Fable 50% (resets in 6d 0h, ahead of pace)"
 
 
 def test_usage_summary_maxed_scoped_marker_wins_over_pace():
@@ -399,13 +401,14 @@ def test_usage_summary_live_countdown_from_resets_at():
         "seven_day": {"pct": 18.0, "resets_at": _iso(86400 + 19 * 3600)},
         "spend": {"pct": 30.0},
     }
-    assert menubar.usage_summary(usage, _NOW) == "5h 42% (2h 33m) · 7d 18% (1d 19h) · $ 30%"
+    assert menubar.usage_summary(usage, _NOW) == "5h 42% (resets in 2h 33m) · 7d 18% (resets in 1d 19h) · $ 30%"
 
 
 def test_usage_summary_omits_countdown_when_passed_or_missing():
-    # 5h reset already passed (stale data) -> omit; 7d has no resets_at -> omit
+    # 5h reset already passed (stale data) -> back at 0%, and the next 5h
+    # window only starts with the next message; 7d has no resets_at -> omit
     usage = {"five_hour": {"pct": 53.0, "resets_at": _iso(-60)}, "seven_day": {"pct": 8.0}}
-    assert menubar.usage_summary(usage, _NOW) == "5h 53% · 7d 8%"
+    assert menubar.usage_summary(usage, _NOW) == "5h 0% (just reset) · 7d 8%"
 
 
 # --- switch-history log parsing ------------------------------------------------
@@ -456,6 +459,9 @@ class _FakeAcct:
         self.usage = usage
         self.alias = alias
         self.disabled = disabled
+        self.rule = AccountRule()
+        self.kind = "oauth"
+        self.switchable = True
 
 
 class _FakeSnap:
@@ -527,13 +533,13 @@ def test_usage_summary_reflects_passed_weekly_reset():
         "five_hour": {"pct": 10.0},
         "seven_day": {"pct": 95.0, "resets_at": _iso(-86400)},
     }
-    assert menubar.usage_summary(usage, _NOW) == "5h 10% · 7d 0% (6d 0h)"
+    assert menubar.usage_summary(usage, _NOW) == "5h 10% · 7d 0% (resets in 6d 0h)"
 
 
 def test_usage_summary_scoped_reflects_passed_weekly_reset():
     usage = {"scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso(-86400)}]}
     # rolled to 0% → the over-limit "(!)" marker is gone too
-    assert menubar.usage_summary(usage, _NOW) == "Fable 0% (6d 0h)"
+    assert menubar.usage_summary(usage, _NOW) == "Fable 0% (resets in 6d 0h)"
 
 
 def test_format_title_reflects_passed_weekly_reset():
@@ -617,3 +623,41 @@ class TestFrameworkBuildWarning:
         # The symptom is that everything looks healthy, so say so.
         msg = menubar.framework_build_warning("Python", "uv", "26.6.2")
         assert "logs nothing" in msg
+
+
+# --- best pick and reset clarity ---------------------------------------------
+
+
+def test_title_carries_the_5h_countdown():
+    s = menubar.MenuBarSettings(show_account_name=False, title_pct="5h")
+    usage = {"five_hour": {"pct": 42.0, "resets_at": _iso(2 * 3600 + 13 * 60)}}
+    assert menubar.format_title("a@x.com", usage, s, _NOW) == "⇄ 42% (2h 13m)"
+
+
+def test_account_label_stars_the_best_pick():
+    label = menubar.format_account_label(2, "a@x.com", {"five_hour": {"pct": 5.0}}, pick=True)
+    assert label.startswith("★ 2  a@x.com")
+
+
+def test_best_switch_label_names_target_and_reason():
+    assert menubar.best_switch_label(None) == "Switch to best"
+    pick = {"number": "3", "email": "c@x.com", "alias": "", "active": False,
+            "reason": "40% left this week · resets in 8h 0m"}
+    assert menubar.best_switch_label(pick) == (
+        "Switch to best → ★ c@x.com  (40% left this week · resets in 8h 0m)"
+    )
+    assert "already on" in menubar.best_switch_label({**pick, "active": True})
+
+
+def test_adapt_snapshot_picks_the_most_perishable_quota_under_smart():
+    soon = {"five_hour": {"pct": 0.0}, "seven_day": {"pct": 60.0, "resets_at": _iso(8 * 3600)}}
+    later = {"five_hour": {"pct": 0.0}, "seven_day": {"pct": 0.0, "resets_at": _iso(6 * 86400)}}
+    snap = _FakeSnap([
+        _FakeAcct("1", "a@x.com", True, _FakeEntry(last_good=later)),
+        _FakeAcct("2", "b@x.com", False, _FakeEntry(last_good=soon)),
+    ])
+    with patch("claude_swap.menubar.time.time", return_value=_NOW):
+        smart = menubar._adapt_snapshot(snap, "smart")
+        best = menubar._adapt_snapshot(snap, "best")
+    assert smart["best_pick"]["number"] == "2"
+    assert best["best_pick"]["number"] == "1"

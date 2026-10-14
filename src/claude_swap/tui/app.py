@@ -22,7 +22,9 @@ from textual.worker import WorkerState
 from claude_swap import printer
 from claude_swap.models import AccountsSnapshot
 from claude_swap.snapshot_source import account_identity
-from claude_swap.settings import load_pool_settings, load_settings, load_ui_settings, set_setting
+from claude_swap.settings import (
+    load_pool_settings, load_settings, load_ui_settings, parse_model_names, set_setting,
+)
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen
@@ -101,11 +103,16 @@ class CswapApp(App):
         # The auto-switch threshold, drawn as a tick on the status strip's
         # bars everywhere. Missing/invalid settings fall back to the default.
         try:
-            self.threshold_pct: float | None = load_settings(
-                switcher.backup_dir
-            ).threshold
+            loaded = load_settings(switcher.backup_dir)
+            self.threshold_pct: float | None = loaded.threshold
+            # What the ★ best pick ranks by: the engine's strategy and
+            # window set, so the badge names the account it would choose.
+            self.routing_strategy = loaded.strategy
+            self.routing_models = parse_model_names(loaded.model)
         except Exception:
             self.threshold_pct = None
+            self.routing_strategy = "best"
+            self.routing_models = ()
         try:
             ui = load_ui_settings(switcher.backup_dir)
             self._theme_name = ui.theme

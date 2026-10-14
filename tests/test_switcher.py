@@ -1316,8 +1316,8 @@ class TestListAccountsUsage:
         backup_creds = json.dumps({"claudeAiOauth": {"accessToken": "sk-backup"}})
 
         usage_response = {
-            "five_hour": {"utilization": 10.0, "resets_at": "2026-01-01T00:00:00Z"},
-            "seven_day": {"utilization": 50.0, "resets_at": "2026-01-02T00:00:00Z"},
+            "five_hour": {"utilization": 10.0, "resets_at": "2099-01-01T00:00:00Z"},
+            "seven_day": {"utilization": 50.0, "resets_at": "2099-01-02T00:00:00Z"},
         }
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps(usage_response).encode()
@@ -1377,7 +1377,7 @@ class TestListAccountsUsage:
 
         usage_response = {
             "five_hour": {"utilization": 0.0, "resets_at": None},
-            "seven_day": {"utilization": 100.0, "resets_at": "2026-04-03T02:59:59Z"},
+            "seven_day": {"utilization": 100.0, "resets_at": "2099-04-03T02:59:59Z"},
         }
         mock_response = MagicMock()
         mock_response.read.return_value = json.dumps(usage_response).encode()
@@ -5735,6 +5735,27 @@ class TestUsageAwareSwitch:
 
         assert s._get_sequence_data()["activeAccountNumber"] == 3
 
+    def test_best_follows_the_smart_strategy_when_configured(self, temp_home: Path):
+        """With autoswitch.strategy=smart, the manual best pick is the quota
+        that expires first, not the most headroom."""
+        from datetime import datetime, timedelta, timezone
+
+        s = self._setup(temp_home)
+        for n, e in ((1, "a@example.com"), (2, "b@example.com"), (3, "c@example.com")):
+            self._seed(s, n, e)
+        self._make_live(temp_home, "a@example.com", 1)
+
+        def week(pct: float, hours: float) -> dict:
+            reset = datetime.now(timezone.utc) + timedelta(hours=hours)
+            return {"five_hour": {"pct": 0.0}, "seven_day": {"pct": pct, "resets_at": reset.isoformat()}}
+
+        usage = {"1": week(50, 100), "2": week(60, 8), "3": week(0, 160)}
+        with patch.object(s, "_usage_by_account", return_value=usage), \
+             patch.object(s, "list_accounts"), \
+             patch.object(s, "routing_strategy", return_value="smart"):
+            s.switch(strategy="best")
+        assert s._get_sequence_data()["activeAccountNumber"] == 2
+
     def test_best_stays_when_current_is_already_best(self, temp_home: Path, capsys):
         """Regression: strategy "best" must NOT move you onto a worse account when you
         already hold the most headroom (real-world bug: 89% current vs 100% other)."""
@@ -6743,11 +6764,22 @@ class TestFormatUsageLines:
         # ahead of the ~14% expected at that point (issue #125).
         from datetime import datetime, timedelta, timezone
 
-        now = 1_700_000_000.0
-        resets_at = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=6)
+        now = time.time()  # the reset must still be ahead, or it reads as just reset
+        # 5.5 days out = 1.5 days elapsed: clear of the 24h post-reset grace
+        resets_at = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=5.5)
         usage = {"seven_day": {"pct": 50.0, "resets_at": resets_at.isoformat()}}
         line = _format_usage_lines(usage, now)[0]
         assert "(ahead of pace)" in line
+
+    def test_a_window_past_its_reset_reads_as_just_reset(self):
+        # The cached 92% belongs to a window that already rolled over: show
+        # the 0% it is back at and the next reset, not "92% ... in 0m".
+        from datetime import datetime, timedelta, timezone
+
+        past = datetime.now(timezone.utc) - timedelta(minutes=20)
+        usage = {"five_hour": {"pct": 92.0, "resets_at": past.isoformat()}}
+        line = _format_usage_lines(usage)[0]
+        assert line == "5h:   0%  (just reset)"  # next 5h starts with the next message
 
     def test_five_hour_never_shows_pace_marker(self):
         # Pace applies only to weekly windows, never the 5h one (issue #125).
@@ -6762,8 +6794,9 @@ class TestFormatUsageLines:
     def test_scoped_ahead_of_pace_marker_when_under_limit(self):
         from datetime import datetime, timedelta, timezone
 
-        now = 1_700_000_000.0
-        resets_at = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=6)
+        now = time.time()  # the reset must still be ahead, or it reads as just reset
+        # 5.5 days out = 1.5 days elapsed: clear of the 24h post-reset grace
+        resets_at = datetime.fromtimestamp(now, tz=timezone.utc) + timedelta(days=5.5)
         usage = {"scoped": [{"name": "Fable", "pct": 50.0, "resets_at": resets_at.isoformat()}]}
         line = _format_usage_lines(usage, now)[0]
         assert "(ahead of pace)" in line
