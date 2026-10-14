@@ -40,6 +40,7 @@ def test_cli_scope_and_compact_listing(monkeypatch, capsys, json_mode):
     switcher = MagicMock()
     switcher.list_accounts.return_value = payload()
     switcher._get_sequence_data.return_value = {"accounts": RECORDS}
+    switcher.best_pick.return_value = (None, {})
     monkeypatch.setattr(cli, "ClaudeAccountSwitcher", lambda **kwargs: switcher)
     monkeypatch.setattr("claude_swap.update_check.check_for_update", lambda _: None)
     monkeypatch.setattr(sys, "argv", ["cswap", "list", "--scope", "shared", "--compact"] + (["--json"] if json_mode else []))
@@ -68,3 +69,31 @@ def test_integrated_sharing_commands_use_existing_pool_operations(monkeypatch, c
     monkeypatch.setattr(sys, "argv", ["cswap", command, *tail])
     cli.main()
     assert calls == [[target, *tail]]
+
+
+def test_compact_listing_shows_countdowns_and_the_best_pick(monkeypatch, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    from claude_swap import recommend
+
+    reset = (datetime.now(timezone.utc) + timedelta(hours=30)).isoformat()
+    data = payload()
+    data["accounts"][2]["usage"] = {
+        "fiveHour": {"pct": 20, "countdown": "2h 13m"},
+        "sevenDay": {"pct": 60, "resetsAt": reset, "countdown": "1d 6h"},
+    }
+    switcher = MagicMock()
+    switcher.list_accounts.return_value = data
+    switcher._get_sequence_data.return_value = {"accounts": RECORDS}
+    outlook = recommend.Outlook(40.0, 40.0, None, 1.3, "7d", None)
+    switcher.best_pick.return_value = ("3", {"3": outlook})
+    switcher.account_email.return_value = "user3@example.com"
+    monkeypatch.setattr(cli, "ClaudeAccountSwitcher", lambda **kwargs: switcher)
+    monkeypatch.setattr("claude_swap.update_check.check_for_update", lambda _: None)
+    monkeypatch.setenv("COLUMNS", "120")
+    monkeypatch.setattr(sys, "argv", ["cswap", "list", "--compact"])
+    cli.main()
+    out = capsys.readouterr().out
+    assert "60% · 1d 6h" in out
+    assert "20% · 2h 13m" in out
+    assert "★ Best pick: user3@example.com — 40% left this week" in out

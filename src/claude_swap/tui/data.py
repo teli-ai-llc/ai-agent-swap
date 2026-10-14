@@ -104,7 +104,7 @@ def window_pct(last_good: dict | None, key: str) -> float | None:
 
 
 def reset_text(window: dict | None, now: float) -> str | None:
-    """Live countdown to one window's reset ("resets 2h 13m"), if known.
+    """Live countdown to one window's reset ("resets in 2h 13m"), if known.
 
     Computed from ``resets_at`` at render time — the countdown the API sent
     was correct at *fetch* time and drifts as the measurement ages.
@@ -121,7 +121,15 @@ def reset_text(window: dict | None, now: float) -> str | None:
     remaining = ts - now
     if remaining <= 0:
         return "resets now"
-    return f"resets {format_duration(remaining)}"
+    return f"resets in {format_duration(remaining)}"
+
+
+def reset_countdown(window: dict | None, now: float) -> str | None:
+    """Bare countdown to one window's reset ("2h 13m"), if known and ahead."""
+    text = reset_text(window, now)
+    if not text or not text.startswith("resets in "):
+        return None
+    return text[len("resets in "):]
 
 
 def reset_clock(window: dict | None, now: float) -> str | None:
@@ -185,6 +193,7 @@ __all__ = [
     "format_duration",
     "last_seen_note",
     "reset_clock",
+    "reset_countdown",
     "reset_text",
     "run_action",
     "sentinel_label",

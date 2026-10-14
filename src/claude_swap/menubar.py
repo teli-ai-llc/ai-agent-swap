@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
-from claude_swap import pace
+from claude_swap import pace, recommend
 from claude_swap.exceptions import ClaudeSwitchError, CredentialReadError
 from claude_swap.printer import warning
 from claude_swap.switcher import SENTINEL_NOTES
@@ -235,12 +235,15 @@ def usage_summary(
         return "usage unavailable"
     if now is None:
         now = time.time()
+    # A window whose reset passed is back at 0% (recommend.project_resets):
+    # the weekly ones roll to their next boundary, a 5-hour one restarts with
+    # the next message, so it just reads "just reset".
+    usage, _ = recommend.project_resets(usage, now)
     parts: list[str] = []
     for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
         window = usage.get(key)
         pace_result = None
         if key == "seven_day":
-            window = _rolled_weekly_window(window, now)  # reflect a passed weekly reset
             # Pace against the rolled window, not the raw one: a stale window
             # rolled to 0% has no current-cycle data to compare against, so
             # its (correctly zeroed) pct naturally never reads as "ahead" —
@@ -248,27 +251,30 @@ def usage_summary(
             # pct with this cycle's freshly-reset 0% display.
             pace_result = pace.compute_pace(window, fetched_at=fetched_at)
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
-            seg = f"{label} {window['pct']:.0f}%"
-            if key == "seven_day" and pace_result and pace_result.ahead:
-                seg += " (ahead)"
+            notes = []
             countdown = _live_countdown(window, now)
             if countdown:
-                seg += f" ({countdown})"  # time until this window resets
-            parts.append(seg)
+                notes.append(f"resets in {countdown}")
+            elif window.get("rolled"):
+                notes.append("just reset")
+            if key == "seven_day" and pace_result and pace_result.ahead:
+                notes.append("ahead of pace")
+            seg = f"{label} {window['pct']:.0f}%"
+            parts.append(f"{seg} ({', '.join(notes)})" if notes else seg)
     # Per-model weekly limits (e.g. Fable), from the usage API's ``limits`` array.
     for window in usage.get("scoped") or []:
-        window = _rolled_weekly_window(window, now)  # weekly cadence, same roll-forward
         pace_result = pace.compute_pace(window, fetched_at=fetched_at)  # against the rolled window, see above
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
             seg = f"{window['name']} {window['pct']:.0f}%"
             if window["pct"] >= 100:
                 seg += " (!)"  # maxed model — the usual reason to switch
-            elif pace_result and pace_result.ahead:
-                seg += " (ahead)"
+            notes = []
             countdown = _live_countdown(window, now)
             if countdown:
-                seg += f" ({countdown})"
-            parts.append(seg)
+                notes.append(f"resets in {countdown}")
+            if window["pct"] < 100 and pace_result and pace_result.ahead:
+                notes.append("ahead of pace")
+            parts.append(f"{seg} ({', '.join(notes)})" if notes else seg)
     spend = usage.get("spend")
     if isinstance(spend, dict) and isinstance(spend.get("pct"), (int, float)):
         parts.append(f"$ {spend['pct']:.0f}%")
@@ -283,11 +289,23 @@ def format_account_label(
     alias: str | None = None,
     disabled: bool = False,
     fetched_at: float | None = None,
+    pick: bool = False,
 ) -> str:
-    """Build one account row's menu label."""
+    """Build one account row's menu label (★ first when it is the best pick)."""
     label = f"{alias}  ({email})" if alias else email
     marker = "  (disabled)" if disabled else ""
-    return f"{num}  {label}{marker}  {usage_summary(usage, now, fetched_at)}"
+    star = "★ " if pick else ""
+    return f"{star}{num}  {label}{marker}  {usage_summary(usage, now, fetched_at)}"
+
+
+def best_switch_label(pick: dict | None) -> str:
+    """"Switch to best" naming its target and why, so it is never blind."""
+    if not pick:
+        return "Switch to best"
+    name = pick.get("alias") or pick["email"]
+    if pick.get("active"):
+        return f"Switch to best — already on ★ {name}"
+    return f"Switch to best → ★ {name}  ({pick['reason']})"
 
 
 def _local_part(email: str, limit: int = 12) -> str:
@@ -314,9 +332,15 @@ def format_title(
     if settings.show_account_name:
         segments.append(alias if alias else _local_part(active_email))
     if settings.title_pct in ("5h", "both"):
-        p = _window_pct(active_usage, "five_hour")
+        five = active_usage.get("five_hour") if isinstance(active_usage, dict) else None
+        projected, _ = recommend.project_resets({"five_hour": five}, now)
+        five = projected.get("five_hour") if isinstance(projected, dict) else None
+        p = five["pct"] if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)) else None
         if p is not None:
-            segments.append(f"{p:.0f}%")
+            # The session window's countdown rides along: how long until
+            # this percentage starts over.
+            countdown = _live_countdown(five, now)
+            segments.append(f"{p:.0f}% ({countdown})" if countdown else f"{p:.0f}%")
     if settings.title_pct in ("7d", "both"):
         seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
         seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
@@ -405,10 +429,16 @@ EMPTY_SNAPSHOT: dict = {
     "active_email": None,
     "active_usage": None,
     "active_alias": None,
+    "best_pick": None,
 }
 
 
-def _adapt_snapshot(snap) -> dict:
+def _adapt_snapshot(
+    snap,
+    strategy: str = "best",
+    models: tuple[str, ...] = (),
+    threshold: float | None = None,
+) -> dict:
     """Adapt an ``AccountsSnapshot`` to the menu bar's render dict.
 
     Shape: ``{"accounts": [(num, email, is_active, display_usage, last_good, alias, disabled, fetched_at), ...],
@@ -432,11 +462,28 @@ def _adapt_snapshot(snap) -> dict:
         )
         if acc.is_active:
             active_email, active_usage, active_alias = acc.email, display, acc.alias
+    # The ★ best pick (recommend.py): the account the configured strategy
+    # would choose, with its one-line reason.
+    now = time.time()
+    picked, outlooks = recommend.snapshot_pick(
+        snap.accounts, models, now, strategy, threshold
+    )
+    pick = None
+    if picked is not None:
+        acc = next(a for a in snap.accounts if a.number == picked)
+        pick = {
+            "number": picked,
+            "email": acc.email,
+            "alias": acc.alias,
+            "active": acc.is_active,
+            "reason": recommend.reason(outlooks[picked], now),
+        }
     return {
         "accounts": accounts,
         "active_email": active_email,
         "active_usage": active_usage,
         "active_alias": active_alias,
+        "best_pick": pick,
     }
 
 
@@ -548,7 +595,7 @@ def run(switcher) -> int:
     )
 
     from claude_swap.autoswitch import AutoSwitchEngine
-    from claude_swap.settings import load_settings, set_setting
+    from claude_swap.settings import load_settings, parse_model_names, set_setting
     from claude_swap.snapshot_source import SnapshotSource
 
     settings_path = switcher.backup_dir / "menubar_settings.json"
@@ -611,7 +658,7 @@ def run(switcher) -> int:
                     # Keep the last good snapshot rather than blanking the menu.
                     self.switcher._logger.debug("menubar snapshot failed", exc_info=True)
                     return
-                snap = _adapt_snapshot(raw)
+                snap = _adapt_snapshot(raw, *self._routing())
                 self._log_usage(snap)
                 self.snapshot = snap
                 self._snapshot_at = time.time()
@@ -733,6 +780,15 @@ def run(switcher) -> int:
             except Exception:
                 return 0
 
+        def _routing(self) -> tuple[str, tuple[str, ...], float | None]:
+            """The auto-switch strategy, models and threshold the ★ best
+            pick ranks by (re-read each refresh, so config changes apply)."""
+            try:
+                loaded = load_settings(self.switcher.backup_dir)
+                return loaded.strategy, parse_model_names(loaded.model), loaded.threshold
+            except Exception:
+                return "best", (), None
+
         # ---- menu construction -----------------------------------------------
         def rebuild_menu(self):
             self.title = format_title(
@@ -762,10 +818,13 @@ def run(switcher) -> int:
                 _purge(self.menu._menu)
             self.menu.clear()
             account_items = []
+            pick = self.snapshot.get("best_pick")
             for num, email, is_active, display, _last_good, alias, disabled, fetched_at in self.snapshot["accounts"]:
                 item = rumps.MenuItem(
                     format_account_label(
-                        num, email, display, alias=alias, disabled=disabled, fetched_at=fetched_at
+                        num, email, display, alias=alias, disabled=disabled,
+                        fetched_at=fetched_at,
+                        pick=bool(pick) and pick["number"] == num,
                     ),
                     callback=self._make_switch_to(num),
                 )
@@ -778,7 +837,7 @@ def run(switcher) -> int:
                 *account_items,
                 None,
                 rumps.MenuItem("Rotate to next", callback=self._switch(None)),
-                rumps.MenuItem("Switch to best", callback=self._switch("best")),
+                rumps.MenuItem(best_switch_label(pick), callback=self._switch("best")),
                 rumps.MenuItem("Next available", callback=self._switch("next-available")),
                 None,
                 self._add_menu(rumps),

@@ -22,7 +22,9 @@ from textual.worker import WorkerState
 from claude_swap import printer
 from claude_swap.models import AccountsSnapshot
 from claude_swap.snapshot_source import account_identity
-from claude_swap.settings import load_pool_settings, load_settings, load_ui_settings, set_setting
+from claude_swap.settings import (
+    load_pool_settings, load_settings, load_ui_settings, parse_model_names, set_setting,
+)
 from claude_swap.switcher import ClaudeAccountSwitcher
 from claude_swap.tui.autoview import AutoScreen
 from claude_swap.tui.dashboard import DashboardScreen
@@ -101,11 +103,16 @@ class CswapApp(App):
         # The auto-switch threshold, drawn as a tick on the status strip's
         # bars everywhere. Missing/invalid settings fall back to the default.
         try:
-            self.threshold_pct: float | None = load_settings(
-                switcher.backup_dir
-            ).threshold
+            loaded = load_settings(switcher.backup_dir)
+            self.threshold_pct: float | None = loaded.threshold
+            # What the ★ best pick ranks by: the engine's strategy and
+            # window set, so the badge names the account it would choose.
+            self.routing_strategy = loaded.strategy
+            self.routing_models = parse_model_names(loaded.model)
         except Exception:
             self.threshold_pct = None
+            self.routing_strategy = "best"
+            self.routing_models = ()
         try:
             ui = load_ui_settings(switcher.backup_dir)
             self._theme_name = ui.theme
@@ -449,6 +456,7 @@ class CswapApp(App):
                 number,
                 swap_limit=form.swap_limit,
                 hard_limit=form.hard_limit,
+                hard_taper=form.hard_taper,
                 priority=form.priority,
             )
         self._start_action(f"Rules for account {number}", fn)
@@ -551,6 +559,7 @@ class CswapApp(App):
                             swap_limit=row.share_swap_limit,
                             hard_limit=row.share_hard_limit,
                             hard_pace=row.share_hard_limit_pace,
+                            hard_taper=row.share_hard_limit_taper,
                         )
         except Exception:
             current = None
@@ -582,6 +591,7 @@ class CswapApp(App):
                 swap_limit=form.swap_limit,
                 hard_limit=form.hard_limit,
                 hard_pace=form.hard_pace,
+                hard_taper=form.hard_taper,
             )
             print(
                 f"{'Shared' if row.shared else 'Published (private)'} {row.email}"

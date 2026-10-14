@@ -9,11 +9,12 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, DataTable, Footer, Input, ListView, Static
 
+from claude_swap import recommend
 from claude_swap.models import AccountSnapshot, AccountsSnapshot
 from claude_swap.tui.dashboard import DashboardScreen, MenuEntries
-from claude_swap.tui.data import sentinel_label, window_pct
+from claude_swap.tui.data import reset_countdown, sentinel_label, window_pct
 from claude_swap.tui.theme import Palette
-from claude_swap.tui.widgets import account_card_text
+from claude_swap.tui.widgets import account_card_text, best_pick, pick_reason
 
 
 def visible_accounts(
@@ -31,7 +32,11 @@ def visible_accounts(
     ]
 
 
-def account_state(acc: AccountSnapshot) -> str:
+def account_state(
+    acc: AccountSnapshot,
+    outlook: recommend.Outlook | None = None,
+    now: float | None = None,
+) -> str:
     if acc.usage.sentinel:
         return sentinel_label(acc.usage.sentinel)
     if not acc.switchable:
@@ -40,9 +45,12 @@ def account_state(acc: AccountSnapshot) -> str:
         return "Auto-switch off"
     if acc.usage.last_good is None:
         return "Usage unknown"
-    if not acc.usage.fresh(time.time()):
-        return "Usage stale"
-    return "Ready"
+    now = time.time() if now is None else now
+    if outlook is not None and outlook.headroom is not None and not outlook.usable:
+        # Say why and when it is back rather than a bare "Ready" it is not.
+        return recommend.reason(outlook, now)
+    # An old reading is still the best we know; the usage cells' * says so.
+    return "Ready" if acc.usage.fresh(now) else "Ready *"
 
 
 class BrowserDashboardScreen(DashboardScreen):
@@ -86,7 +94,8 @@ class BrowserDashboardScreen(DashboardScreen):
     async def on_mount(self) -> None:
         table = self.query_one(DataTable)
         for name, width in (("Account", 28), ("Owner", 6), ("Sharing", 12),
-                            ("5h used", 7), ("7d used", 7), ("Status", 16)):
+                            ("5h used · resets", 16), ("7d used · resets", 16),
+                            ("Status", 28)):
             table.add_column(name, width=width)
         table.focus()
         self.query_one("#menu").display = False
@@ -106,6 +115,16 @@ class BrowserDashboardScreen(DashboardScreen):
         active = next((acc for acc in snap.accounts if acc.is_active), None)
         login = (active.alias or active.email) if active else "no managed login"
         summary = f"{mine} yours · {shared} shared · Active: {login}"
+        now = time.time()
+        picked, outlooks = best_pick(self.app, snap, now)
+        pick = next((acc for acc in snap.accounts if acc.number == picked), None)
+        if pick is not None:
+            summary += (
+                f"\n★ Best pick: {pick.alias or pick.email}"
+                f" — {pick_reason(picked, outlooks, now)}"
+            )
+            if pick.is_active:
+                summary += " (you're on it)"
         if self.app.refresh_status:
             summary += f" · {self.app.refresh_status}"
         self.query_one("#browser-summary", Static).update(summary)
@@ -127,6 +146,8 @@ class BrowserDashboardScreen(DashboardScreen):
             table.clear()
             self._row_keys = keys
         palette = Palette.from_theme(self.app.current_theme)
+        now = time.time()
+        picked, outlooks = best_pick(self.app, snap, now)
         for acc in self._visible:
             name = f"{'●' if acc.is_active else ' '} {acc.number}  {acc.alias or acc.email}"
             if acc.alias:
@@ -138,9 +159,11 @@ class BrowserDashboardScreen(DashboardScreen):
                 Text(name, style=palette.accent if acc.is_active else palette.foreground),
                 "Yours" if acc.is_mine else "Team",
                 sharing,
-                self._usage_cell(acc, "five_hour", palette),
-                self._usage_cell(acc, "seven_day", palette),
-                account_state(acc),
+                self._usage_cell(acc, "five_hour", palette, now),
+                self._usage_cell(acc, "seven_day", palette, now),
+                Text("★ Best pick", style=f"bold {palette.sev_ok}")
+                if acc.number == picked
+                else account_state(acc, outlooks.get(acc.number), now),
             )
             if rebuild:
                 table.add_row(*cells, key=acc.number)
@@ -166,11 +189,26 @@ class BrowserDashboardScreen(DashboardScreen):
         self._update_detail()
 
     @staticmethod
-    def _usage_cell(acc: AccountSnapshot, key: str, palette: Palette) -> Text:
-        pct = None if acc.usage.sentinel else window_pct(acc.usage.last_good, key)
+    def _usage_cell(
+        acc: AccountSnapshot, key: str, palette: Palette, now: float | None = None
+    ) -> Text:
+        """``47% · 2h 13m``: used, then the countdown to that window's reset.
+        A window whose reset already passed reads 0% (recommend.py) until
+        the next fetch confirms it."""
+        now = time.time() if now is None else now
+        last_good = None if acc.usage.sentinel else acc.usage.last_good
+        projected, _ = recommend.project_resets(last_good, now)
+        pct = window_pct(projected, key)
         if pct is None:
             return Text("—", style=palette.muted)
-        return Text(f"{pct:.0f}%{' *' if not acc.usage.fresh(time.time()) else ''}", style=palette.severity(pct))
+        text = Text(
+            f"{pct:.0f}%{' *' if not acc.usage.fresh(now) else ''}",
+            style=palette.severity(pct),
+        )
+        countdown = reset_countdown(projected.get(key), now)
+        if countdown:
+            text.append(f" · {countdown}", style=palette.muted)
+        return text
 
     def _selected(self) -> AccountSnapshot | None:
         return next((acc for acc in self._visible if acc.number == self._selected_number), None)
@@ -178,10 +216,28 @@ class BrowserDashboardScreen(DashboardScreen):
     def _update_detail(self) -> None:
         acc = self._selected()
         detail = self.query_one("#account-detail", Static)
-        detail.update(account_card_text(
+        now = time.time()
+        picked, outlooks = best_pick(self.app, self.app.snapshot, now)
+        if acc is None:
+            detail.update("")
+            return
+        palette = Palette.from_theme(self.app.current_theme)
+        text = account_card_text(
             acc, max(30, self.size.width - 8), threshold=self.app.threshold_pct,
-            palette=Palette.from_theme(self.app.current_theme),
-        ) if acc else "")
+            palette=palette, now=now,
+            pick=pick_reason(picked, outlooks, now) if acc.number == picked else None,
+        )
+        if acc.number == picked:
+            text.append(f"\n    ★ {pick_reason(picked, outlooks, now)}", style=palette.sev_ok)
+        # What the marks on each bar mean.
+        text.append("\n    ")
+        text.append("│", style=f"bold {palette.foreground}")
+        text.append(" time gone in the window (fill past it = ahead of pace)   ", style=palette.muted)
+        text.append("┃", style=palette.sev_warn)
+        text.append(" switch point   ", style=palette.muted)
+        text.append("┃", style=palette.sev_crit)
+        text.append(" hard limit", style=palette.muted)
+        detail.update(text)
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self._selected_number = str(event.row_key.value)

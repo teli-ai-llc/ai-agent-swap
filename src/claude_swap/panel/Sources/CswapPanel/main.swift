@@ -11,11 +11,12 @@
 //   CSWAP_PANEL_PROGRAM   absolute path of the `cswap` console script
 //   CSWAP_PANEL_DATA_DIR  cswap's backup root (sequence.json lives there)
 //
-// The popover is sized to the account count: up to MAX_CARDS full cards plus
-// the menu. The TUI is told the same cap through CSWAP_MAX_ACCOUNT_CARDS so
-// that past MAX_CARDS the accounts panel scrolls instead of pushing the menu
-// off the bottom. CARD_ROWS / CARD_GAP / PANEL_CHROME mirror the constants in
-// claude_swap/tui/dashboard.py — keep them in sync.
+// The popover shows the same account table as `cswap` in a terminal (the
+// browser screen: countdowns, ★ best pick, the selected account's bars), and
+// is sized to the account count: one table row per account up to MAX_ROWS,
+// past which the table scrolls. BROWSER_CHROME / DETAIL_ROWS mirror the
+// fixed parts of the browser layout in claude_swap/tui/cswap.tcss — keep
+// them in sync.
 
 import AppKit
 import SwiftTerm
@@ -24,12 +25,11 @@ let env = ProcessInfo.processInfo.environment
 let HOME = NSHomeDirectory()
 let DATA_DIR = env["CSWAP_PANEL_DATA_DIR"] ?? "\(HOME)/.claude-swap-backup"
 
-let COLS = 104
-let MAX_CARDS = 3        // accounts shown before the accounts panel scrolls
-let CARD_ROWS = 4        // header + 5h + 7d + one per-model row
-let CARD_GAP = 1         // blank row between full cards
-let PANEL_CHROME = 3     // accounts panel padding (2) + bottom border (1)
-let MENU_ROWS = 14       // menu title (2) + menu padding (1) + 9 entries + footer (1) + 1 spare
+let COLS = 132           // the table's columns at full width
+let MAX_ROWS = 14        // account rows shown before the table scrolls
+let BROWSER_CHROME = 12  // heading (2) + summary (2) + scope tabs (3) + search (4) + table header (1)
+let DETAIL_ROWS = 10     // selected account: border + padding (3) + card (4) + ★ line + legend + spare
+let FOOTER_ROWS = 1
 
 func resolveCswap() -> String? {
     if let p = env["CSWAP_PANEL_PROGRAM"], FileManager.default.isExecutableFile(atPath: p) {
@@ -71,11 +71,11 @@ final class TermVC: NSViewController, LocalProcessTerminalViewDelegate {
         view = term
     }
 
-    /// Size the terminal for up to MAX_CARDS accounts plus the menu; returns the pixel size.
+    /// Size the terminal for the account table (up to MAX_ROWS rows) plus
+    /// the selected account's detail; returns the pixel size.
     func fitToAccounts() -> NSSize {
-        let shown = min(accountCount(), MAX_CARDS)
-        let cards = shown * CARD_ROWS + max(0, shown - 1) * CARD_GAP
-        term.resize(cols: COLS, rows: PANEL_CHROME + cards + MENU_ROWS)
+        let shown = min(accountCount(), MAX_ROWS)
+        term.resize(cols: COLS, rows: BROWSER_CHROME + shown + DETAIL_ROWS + FOOTER_ROWS)
         let f = term.getOptimalFrameSize()
         return NSSize(width: ceil(f.width), height: ceil(f.height))
     }
@@ -92,7 +92,9 @@ final class TermVC: NSViewController, LocalProcessTerminalViewDelegate {
         child["COLORTERM"] = "truecolor"
         if child["LANG"] == nil { child["LANG"] = "en_US.UTF-8" }
         child["HOME"] = HOME
-        child["CSWAP_MAX_ACCOUNT_CARDS"] = String(MAX_CARDS)
+        // No CSWAP_MAX_ACCOUNT_CARDS: without it the TUI opens the account
+        // table, the same view as `cswap` in a terminal.
+        child.removeValue(forKey: "CSWAP_MAX_ACCOUNT_CARDS")
         let dirs = [URL(fileURLWithPath: cswap).deletingLastPathComponent().path,
                     "\(HOME)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         child["PATH"] = dirs.joined(separator: ":")

@@ -325,6 +325,102 @@ class TestOwnerLimitChangesReachExistingBorrowers:
         assert s._get_sequence_data()["lastUpdated"] == before
 
 
+class TestOwnerTaperReachesBorrowers:
+    _land = TestOwnerLimitChangesReachExistingBorrowers._land
+    _rotate = TestOwnerLimitChangesReachExistingBorrowers._rotate
+    _rule = staticmethod(TestOwnerLimitChangesReachExistingBorrowers._rule)
+
+    def test_the_owner_moving_to_taper_reaches_a_borrower_and_back(self, sync_env, fake_pool, owner, borrower):
+        fake_pool.taper = True
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                              hard_taper=True)
+        assert sync.run_pass().errors == []
+        rule = self._rule(s)
+        assert (rule.hard_limit, rule.hard_taper, rule.hard_pace) == (50.0, True, False)
+        assert s._get_sequence_data()["accounts"]["1"]["poolShareHardTaper"] is True
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                              hard_taper=False)
+        sync.run_pass()
+        assert self._rule(s).hard_taper is False
+
+    def test_a_new_tapered_row_lands_with_the_flag(self, sync_env, fake_pool, owner, borrower):
+        fake_pool.taper = True
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=None, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=None, hard_limit=50.0,
+                              hard_taper=True)
+        sync.run_pass()
+        assert self._rule(s).hard_taper is True
+
+    def test_a_borrower_may_turn_taper_off_and_the_owner_cannot_force_it_back_on(
+        self, sync_env, fake_pool, owner, borrower
+    ):
+        """Off is the stricter state: a borrower keeping a fixed limit is
+        their own choice, like a borrower's own stricter number."""
+        fake_pool.taper = True
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                              hard_taper=True)
+        sync.run_pass()
+        s.set_account_rule("1", hard_taper=False, quiet=True)   # `cswap rule 1 --no-taper`
+        self._rotate(client, row)
+        sync.run_pass()
+        assert self._rule(s).hard_taper is False
+
+
+    def test_a_borrowers_own_stricter_number_is_not_loosened_by_the_owners_taper(
+        self, sync_env, fake_pool, owner, borrower
+    ):
+        fake_pool.taper = True
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        s.set_account_rule("1", hard_limit=30.0, quiet=True)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                              hard_taper=True)
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.hard_limit, rule.hard_taper) == (30.0, False)
+
+    def test_the_pool_drops_taper_when_pace_or_no_limit_is_set_blind_to_it(
+        self, sync_env, fake_pool, owner, borrower
+    ):
+        """An owner machine on an older cswap never sends the taper column."""
+        fake_pool.taper = True
+        fake_pool.schema_version = "2"
+        s, client, sync, row = self._land(sync_env, fake_pool, owner, borrower, swap=80.0, hard=50.0)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=50.0,
+                              hard_taper=True)
+        client.update_sharing(self.owner_session, row.id, shared=True, swap_limit=80.0, hard_limit=None,
+                              hard_pace=True)          # old client: no taper column in the PATCH
+        assert fake_pool.row(row.id)["share_hard_limit_taper"] is False
+        sync.run_pass()
+        rule = self._rule(s)
+        assert (rule.hard_pace, rule.hard_taper) == (True, False)
+
+
+class TestReconcileOwnerTaper:
+    def test_a_row_with_pace_and_taper_grants_no_taper(self):
+        from types import SimpleNamespace
+
+        from claude_swap.pool.sync import owner_taper
+        row = SimpleNamespace(share_hard_limit_taper=True, share_hard_limit_pace=True,
+                              share_hard_limit=50.0)
+        assert owner_taper(row) is False
+        row.share_hard_limit_pace = False
+        assert owner_taper(row) is True
+        row.share_hard_limit = None
+        assert owner_taper(row) is False
+
+    def test_untouched_follows_the_owner(self):
+        from claude_swap.pool.sync import reconcile_owner_taper
+        assert reconcile_owner_taper(False, False, True, previous_known=True) is True
+        assert reconcile_owner_taper(True, True, False, previous_known=True) is False
+
+    def test_a_borrowers_own_choice_keeps_the_stricter_off(self):
+        from claude_swap.pool.sync import reconcile_owner_taper
+        assert reconcile_owner_taper(False, True, True, previous_known=True) is False
+        assert reconcile_owner_taper(True, False, False, previous_known=True) is False
+
+
 class TestReconcileOwnerLimit:
     """``None`` is "no limit". (current, previous, new) -> result."""
 

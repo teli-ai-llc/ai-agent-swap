@@ -3,7 +3,9 @@
 ``bar_cells``/``usage_bar`` are custom renderers rather than Textual's
 ``ProgressBar`` because the design needs three things the stock widget
 doesn't do: a severity color ramp, an optional threshold tick mark (the
-auto-switch trigger line), and stale-measurement dimming.
+auto-switch trigger line), a time marker (how much of the window has
+elapsed: fill past it means usage is ahead of an even pace), and
+stale-measurement dimming.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from typing import TYPE_CHECKING
 from rich.text import Text
 from textual.widgets import ListItem, Static
 
-from claude_swap import pace
+from claude_swap import pace, recommend
 from claude_swap.json_output import USAGE_API_KEY
 from claude_swap.models import AccountSnapshot
 from claude_swap.rules import AccountRule, resolve_rule, week_progress
@@ -30,6 +32,7 @@ _BAR_FILLED = "━"
 _BAR_HALF = "╸"
 _BAR_EMPTY = "─"
 _BAR_TICK = "┃"
+_BAR_TIME = "│"
 
 
 def bar_cells(
@@ -39,11 +42,14 @@ def bar_cells(
     stale: bool = False,
     threshold: float | None = None,
     hard_limit: float | None = None,
+    elapsed: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
     """Just the bar glyphs: severity-colored fill, track, optional ticks —
     the swap threshold (warning color) and, when the account has one below
-    100, its hard limit (critical color)."""
+    100, its hard limit (critical color) — and, when ``elapsed`` (0–100, the
+    share of the window's period already gone) is known, a time marker: an
+    even pace would have the fill end exactly there."""
     text = Text()
     if pct is None:
         text.append(_BAR_EMPTY * width, style=palette.track)
@@ -58,6 +64,9 @@ def bar_cells(
     hard_at: int | None = None
     if hard_limit is not None and hard_limit < 100.0:
         hard_at = min(width - 1, max(0, round(hard_limit / 100.0 * width)))
+    time_at: int | None = None
+    if elapsed is not None:
+        time_at = min(width - 1, max(0, int(elapsed / 100.0 * width)))
     color = palette.severity(pct)
     fill_style = f"{color} dim" if stale else color
     for i in range(width):
@@ -65,6 +74,8 @@ def bar_cells(
             text.append(_BAR_TICK, style=palette.sev_crit)
         elif tick_at is not None and i == tick_at:
             text.append(_BAR_TICK, style=palette.sev_warn)
+        elif time_at is not None and i == time_at:
+            text.append(_BAR_TIME, style=f"bold {palette.foreground}")
         elif i < full:
             text.append(_BAR_FILLED, style=fill_style)
         elif i == full and half:
@@ -83,14 +94,15 @@ def usage_bar(
     stale: bool = False,
     threshold: float | None = None,
     hard_limit: float | None = None,
+    elapsed: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
-    """One full bar line: ``5h ━━━━╸────┃──  47%  resets 2h 13m · 20:39``."""
+    """One full bar line: ``5h ━━━━╸──│──┃──  47%  resets in 2h 13m · 20:39``."""
     text = Text()
     text.append(f"{label} ", style=palette.muted)
     text.append(bar_cells(
         pct, width, stale=stale, threshold=threshold, hard_limit=hard_limit,
-        palette=palette,
+        elapsed=elapsed, palette=palette,
     ))
     if pct is None:
         text.append("  usage unknown", style=palette.muted)
@@ -105,10 +117,14 @@ def usage_bar(
 def _reset_parts(window: dict, now: float) -> tuple[str | None, str | None]:
     """Countdown suffix and its clock-extended variant for one window.
 
-    ``("resets 2h 13m", "resets 2h 13m · 20:39")`` — the second form is what
-    a row shows when it has the width for it. Equal when no clock is known.
+    ``("resets in 2h 13m", "resets in 2h 13m · 20:39")`` — the second form
+    is what a row shows when it has the width for it. Equal when no clock is
+    known. A window projected past its reset (recommend.project_resets) says
+    so: its 0% is an expectation until the next fetch confirms it.
     """
     reset = data.reset_text(window, now)
+    if window.get("rolled"):
+        reset = f"just reset · next {reset}" if reset else "just reset"
     if not reset:
         return None, None
     clock = data.reset_clock(window, now)
@@ -138,6 +154,7 @@ def usage_rows(
     """
     if not isinstance(last_good, dict):
         return []
+    last_good, _ = recommend.project_resets(last_good, now)
     rows: list[tuple[str, float, str, str]] = []
     spend = last_good.get("spend")
     if spend:
@@ -173,6 +190,56 @@ def usage_rows(
     return rows
 
 
+def window_elapsed(window: dict | None, period_s: float, now: float) -> float | None:
+    """How much of a window's period has gone by, 0–100, or None if unknown."""
+    if not isinstance(window, dict):
+        return None
+    ts = recommend.parse_reset_ts(window.get("resets_at"))
+    if ts is None:
+        return None
+    remaining = (ts - now) % period_s if ts > now else 0.0
+    return max(0.0, min(100.0, (1.0 - remaining / period_s) * 100.0))
+
+
+def usage_row_elapsed(last_good: dict | None, now: float) -> list[float | None]:
+    """:func:`window_elapsed` for each row :func:`usage_rows` returns, in the
+    same order (spend has no period, so no marker)."""
+    if not isinstance(last_good, dict):
+        return []
+    last_good, _ = recommend.project_resets(last_good, now)
+    out: list[float | None] = []
+    if last_good.get("spend"):
+        out.append(None)
+    for key, period in (("five_hour", recommend.FIVE_HOUR_S), ("seven_day", recommend.WEEK_S)):
+        if last_good.get(key):
+            out.append(window_elapsed(last_good[key], period, now))
+    for window in last_good.get("scoped") or []:
+        out.append(window_elapsed(window, recommend.WEEK_S, now))
+    return out
+
+
+def best_pick(app, snap, now: float) -> tuple[str | None, dict]:
+    """``(number, outlooks)`` for the ★ best pick under the app's configured
+    strategy and models (recommend.py), or ``(None, ...)`` when nothing in
+    rotation is usable."""
+    if snap is None:
+        return None, {}
+    return recommend.snapshot_pick(
+        snap.accounts,
+        getattr(app, "routing_models", ()),
+        now,
+        getattr(app, "routing_strategy", "best"),
+        getattr(app, "threshold_pct", None),
+    )
+
+
+def pick_reason(number: str | None, outlooks: dict, now: float) -> str | None:
+    """The ★ line's text for the picked account."""
+    if number is None or number not in outlooks:
+        return None
+    return recommend.reason(outlooks[number], now)
+
+
 def _over_hard_limit(acc: AccountSnapshot, now: float) -> bool:
     """Whether the account's 5h/7d usage has reached its own hard limit
     (a pace-bound one resolved against the week at ``now``)."""
@@ -198,7 +265,8 @@ def rule_chips(rule: AccountRule, threshold: float | None, progress: float | Non
 
 
 def _progress_for(acc: AccountSnapshot, now: float) -> float | None:
-    return week_progress(acc.usage.last_good, now) if acc.rule.hard_pace else None
+    tracks_week = acc.rule.hard_pace or acc.rule.hard_taper
+    return week_progress(acc.usage.last_good, now) if tracks_week else None
 
 
 def account_card_text(
@@ -208,14 +276,24 @@ def account_card_text(
     threshold: float | None = None,
     now: float | None = None,
     palette: Palette = Palette.DARK,
+    pick: str | None = None,
 ) -> Text:
     """The full account card: header line + per-window bar rows. The bars
     carry the account's own swap threshold tick and, if it has one, a
-    critical-colored hard-limit tick (rules.py)."""
+    critical-colored hard-limit tick (rules.py), plus a time marker. ``pick``
+    is set (the recommendation's reason, recommend.py) when this account is
+    the best pick: its number gets a ★ in place of padding, so the card keeps
+    its height, which the menu bar panel's sizing relies on."""
     now = now if now is not None else time.time()
 
     text = Text()
-    text.append(f"{acc.number:>2}  ", style=f"bold {palette.foreground}")
+    if pick is not None:
+        # In the number's own slot ("★ 2 " is as wide as " 2  "), so the
+        # header never grows and the card keeps its height.
+        text.append("★", style=f"bold {palette.sev_ok}")
+        text.append(f"{acc.number:>2} ", style=f"bold {palette.sev_ok}")
+    else:
+        text.append(f"{acc.number:>2}  ", style=f"bold {palette.foreground}")
     if acc.alias:
         text.append(acc.alias, style=f"bold {palette.accent}")
         text.append(f" ({acc.email})", style=palette.foreground)
@@ -288,11 +366,12 @@ def account_card_text(
     tick = acc.rule.swap_for(threshold) if threshold is not None else None
     resolved = resolve_rule(acc.rule, acc.usage.last_good, now)
     hard_limit = resolved.hard_limit if resolved.hard_limit < 100.0 else None
+    elapsed = usage_row_elapsed(acc.usage.last_good, now)
     label_width = max(len(label) for label, _pct, _suffix, _full in rows)
     bar_width = max(12, min(30, width - 42 - label_width))
     # everything on a row except the suffix: indent, label, bar, " NNN%", gap
     row_overhead = 4 + label_width + 1 + bar_width + 5 + 2
-    for label, pct, suffix, suffix_full in rows:
+    for (label, pct, suffix, suffix_full), row_elapsed in zip(rows, elapsed):
         # per-row: show the absolute clock only where it fits, so a long
         # spend row degrading doesn't cost the 5h/7d rows their clocks
         if suffix_full != suffix and row_overhead + len(suffix_full) <= width:
@@ -307,6 +386,7 @@ def account_card_text(
                 stale=stale,
                 threshold=tick,
                 hard_limit=hard_limit,
+                elapsed=row_elapsed,
                 palette=palette,
             )
         )
@@ -314,17 +394,21 @@ def account_card_text(
 
 
 def mini_account_text(
-    acc: AccountSnapshot, now: float, *, palette: Palette = Palette.DARK
+    acc: AccountSnapshot, now: float, *, palette: Palette = Palette.DARK,
+    pick: bool = False,
 ) -> Text:
     """One minimized line for an inactive account.
 
-    ``2  work@acme.dev [personal]   5h 92% · 7d 63%`` — pcts only, severity
-    colored; a window at/over 100% brings its reset countdown along, and a
-    maxed per-model window shows as ``Fable (!)``. Sentinel states show
-    their label instead.
+    ``2  work@acme.dev [personal]   5h 92% (2h 13m) · 7d 63% (3d 4h)`` —
+    severity-colored pcts, each with its reset countdown, and a maxed
+    per-model window as ``Fable (!)``. Sentinel states show their label
+    instead. ``pick`` marks the recommended account with a ★.
     """
     text = Text(no_wrap=True, overflow="ellipsis")
-    text.append(f"{acc.number:>2}  ", style=f"bold {palette.muted}")
+    if pick:
+        text.append(f"★{acc.number:>2} ", style=f"bold {palette.sev_ok}")
+    else:
+        text.append(f"{acc.number:>2}  ", style=f"bold {palette.muted}")
     if acc.alias:
         text.append(acc.alias, style=f"bold {palette.accent}")
         text.append(f" ({acc.email})", style=palette.foreground)
@@ -346,7 +430,7 @@ def mini_account_text(
         text.append(data.sentinel_label(sentinel), style=style)
         return text
 
-    last_good = acc.usage.last_good
+    last_good, _ = recommend.project_resets(acc.usage.last_good, now)
     fetched_at = acc.usage.fetched_at
     stale = acc.usage.age_s is not None and acc.usage.age_s > STALE_OK_S
     parts = 0
@@ -360,11 +444,10 @@ def mini_account_text(
         color = palette.severity(pct)
         text.append(f"{label} ", style=palette.muted)
         text.append(f"{pct:.0f}%", style=f"{color} dim" if stale else color)
-        if pct >= 100:
-            reset = data.reset_text(window, now)
-            if reset:
-                text.append(f" ({reset})", style=palette.muted)
-        elif key == "seven_day":
+        countdown = data.reset_countdown(window, now)
+        if countdown:
+            text.append(f" ({countdown})", style=palette.muted)
+        if key == "seven_day" and pct < 100:
             result = pace.compute_pace(window, fetched_at=fetched_at)
             if result and result.ahead:
                 text.append(" (ahead)", style=palette.sev_warn)
@@ -416,18 +499,23 @@ class AccountsPanel(Static):
         width = (self.size.width or 80) - 2
         blocks: list[Text] = []
         minis = getattr(app, "inactive_cards", "full") == "mini"
+        picked, outlooks = best_pick(app, snap, now)
         for acc in snap.accounts:
             if not acc.is_active and not self._show_inactive:
                 continue
+            is_pick = acc.number == picked
             if acc.is_active or not minis:
                 blocks.append(
                     account_card_text(
                         acc, width, threshold=app.threshold_pct, now=now,
                         palette=palette,
+                        pick=pick_reason(picked, outlooks, now) if is_pick else None,
                     )
                 )
             else:
-                blocks.append(mini_account_text(acc, now, palette=palette))
+                blocks.append(
+                    mini_account_text(acc, now, palette=palette, pick=is_pick)
+                )
         if not blocks:
             return Text("no active managed login", style=palette.muted)
         text = Text()

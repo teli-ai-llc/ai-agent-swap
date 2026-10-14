@@ -527,7 +527,8 @@ class TestPoolShareAction:
             client = object()
             session = object()
 
-            def publish_slot(self, num, *, shared, swap_limit, hard_limit, hard_pace=False):
+            def publish_slot(self, num, *, shared, swap_limit, hard_limit, hard_pace=False,
+                             hard_taper=False):
                 calls.append((num, shared, swap_limit, hard_limit))
                 return SimpleNamespace(
                     shared=shared,
@@ -535,6 +536,7 @@ class TestPoolShareAction:
                     share_swap_limit=swap_limit,
                     share_hard_limit=hard_limit,
                     share_hard_limit_pace=hard_pace,
+                    share_hard_limit_taper=hard_taper,
                 )
 
         monkeypatch.setattr(pool_sync, "build_sync", lambda switcher: StubSync())
@@ -568,6 +570,7 @@ class TestPoolShareAction:
                 return SimpleNamespace(
                     shared=False, share_swap_limit=70.0, share_hard_limit=40.0,
                     share_hard_limit_pace=False,
+                    share_hard_limit_taper=False,
                 )
 
         class StubSync:

@@ -511,6 +511,7 @@ def _rule_command(argv: list[str]) -> None:
         parse_hard_limit,
         parse_priority,
         parse_swap_limit,
+        taper_limit,
         week_progress,
     )
     from claude_swap.settings import load_settings
@@ -524,6 +525,9 @@ def _rule_command(argv: list[str]) -> None:
             "— not a switch target, and left at once when active (default 100). "
             "'pace' (the bare --hard-limit) makes it the share of the account's "
             "7-day window that has passed, so it is never used ahead of pace. "
+            "--taper shrinks the hard limit's reserve with the week: the cap is "
+            "100 - (100 - limit) x share of the week left, so a 50% limit is "
+            "80% with 40% of the week left and 100% at the reset. "
             "priority: 1 is most preferred; lower numbers win, ties route by "
             "usage, and the engine returns to a higher-priority account as soon "
             "as it is healthy again (default 1)."
@@ -534,6 +538,7 @@ Examples:
   cswap rule                                  # list every account's rule
   cswap rule 3 --priority 2 --hard-limit      # a backup: only when others are out, never ahead of its week
   cswap rule 3 --priority 2 --hard-limit 50   # ... or only to a fixed 50%
+  cswap rule 3 --hard-limit 50 --taper        # 50%, loosening to 100% as the week runs out
   cswap rule 1 --swap-limit 95
   cswap rule 3 --hard-limit off               # clear one field
   cswap rule 3 --reset                        # clear all three
@@ -554,6 +559,10 @@ Examples:
         help="'pace' (the bare flag): the share of the week that has passed; or 1-100, or 'off' (= 100)",
     )
     parser.add_argument(
+        "--taper", action=argparse.BooleanOptionalAction, default=None,
+        help="The hard limit's reserve shrinks with the week left (--no-taper: a fixed limit)",
+    )
+    parser.add_argument(
         "--priority", metavar="N", help="1-99 (1 = most preferred), or 'off' (= 1)",
     )
     parser.add_argument(
@@ -564,7 +573,7 @@ Examples:
     args = parser.parse_args(argv)
 
     editing = args.reset or any(
-        v is not None for v in (args.swap_limit, args.hard_limit, args.priority)
+        v is not None for v in (args.swap_limit, args.hard_limit, args.priority, args.taper)
     )
     if args.account is None and editing:
         parser.error("NUM|EMAIL is required when setting a rule")
@@ -601,6 +610,7 @@ Examples:
                             "swapLimit": rule.swap_limit,
                             "hardLimit": rule.hard_limit,
                             "hardLimitPace": rule.hard_pace,
+                            "hardLimitTaper": rule.hard_taper,
                             "priority": rule.priority,
                         }
                         for num, email, rule in rows
@@ -614,7 +624,10 @@ Examples:
             # A pace-bound limit is shown with the number it means right now,
             # from the usage already on disk (never a fetch).
             entries: dict = {}
-            if any(rule is not None and rule.hard_pace for _, _, rule in rows):
+            if any(
+                rule is not None and (rule.hard_pace or rule.hard_taper)
+                for _, _, rule in rows
+            ):
                 try:
                     entries = switcher.usage_entries_by_account(fetch=set())
                 except Exception:
@@ -635,6 +648,12 @@ Examples:
                     hard = "pace" + (f" ({progress:.0f}%)" if progress is not None else "")
                     if rule.hard_limit < 100.0:
                         hard += f" ≤{rule.hard_limit:.10g}%"
+                elif rule.hard_taper and rule.hard_limit < 100.0:
+                    entry = entries.get(num)
+                    progress = week_progress(entry.last_good if entry else None, now)
+                    hard = f"{rule.hard_limit:.10g}% taper"
+                    if progress is not None:
+                        hard += f" (now {taper_limit(rule.hard_limit, progress):.0f}%)"
                 else:
                     hard = f"{rule.hard_limit:.10g}%"
                 print(
@@ -650,14 +669,18 @@ Examples:
             prio = KEEP if args.priority is None else parse_priority(args.priority)
         except ValueError as exc:
             parser.error(str(exc))
-        num, email, rule = switcher.set_account_rule(
-            args.account,
-            swap_limit=swap,
-            hard_limit=hard,
-            priority=prio,
-            reset=args.reset,
-            quiet=args.json,
-        )
+        try:
+            num, email, rule = switcher.set_account_rule(
+                args.account,
+                swap_limit=swap,
+                hard_limit=hard,
+                hard_taper=KEEP if args.taper is None else args.taper,
+                priority=prio,
+                reset=args.reset,
+                quiet=args.json,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         if args.json:
             print(json.dumps({
                 "schemaVersion": 1,
@@ -666,6 +689,7 @@ Examples:
                 "swapLimit": rule.swap_limit,
                 "hardLimit": rule.hard_limit,
                 "hardLimitPace": rule.hard_pace,
+                "hardLimitTaper": rule.hard_taper,
                 "priority": rule.priority,
             }, indent=2))
     except ClaudeSwitchError as e:
@@ -842,12 +866,13 @@ Defaults live in settings.json in the backup root; flags override them.
     )
     parser.add_argument(
         "--strategy",
-        choices=("best", "consume-first"),
+        choices=("best", "consume-first", "smart"),
         default=None,
         help=(
-            "Target selection: 'best' (most quota left; default) or "
+            "Target selection: 'best' (most quota left; default), "
             "'consume-first' (proactively use the account whose weekly window "
-            "resets soonest)"
+            "resets soonest) or 'smart' (proactively use the account whose "
+            "remaining weekly quota would otherwise expire first)"
         ),
     )
     parser.add_argument(
@@ -1701,6 +1726,16 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                     payload, (switcher._get_sequence_data() or {}).get("accounts", {}),
                     scope=args.scope or "all", search=args.search or "",
                 )
+                from claude_swap import recommend
+                picked, outlooks = switcher.best_pick(
+                    *(getattr(switcher, "_last_list_pass", None) or ())
+                )
+                if picked is not None:
+                    payload["bestPick"] = {
+                        "number": int(picked),
+                        "email": switcher.account_email(picked),
+                        "reason": recommend.reason(outlooks[picked], time.time()),
+                    }
                 if not args.json:
                     print_catalog(payload)
                     payload = None

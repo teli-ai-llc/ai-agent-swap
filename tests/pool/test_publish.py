@@ -71,6 +71,32 @@ class TestPublishSlot:
         row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=50.0)
         assert row.share_hard_limit_pace is False and row.share_hard_limit == 50.0
 
+    def test_taper_needs_migration_0005_and_plain_shares_never_send_the_column(self, owner_env, fake_pool):
+        s, client, session = owner_env
+        sync = PoolSync(s, client, session, machine_id=MID)
+        with pytest.raises(PoolError, match="0005"):
+            sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=50.0, hard_taper=True)
+        assert fake_pool.rows() == []
+        row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=50.0)  # no column sent
+        assert row.share_hard_limit_taper is False
+        fake_pool.taper = True
+        row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=50.0, hard_taper=True)
+        assert row.share_hard_limit_taper is True and row.share_hard_limit == 50.0
+        assert fake_pool.row(row.id)["share_hard_limit_taper"] is True
+        row = sync.publish_slot("1", shared=True, swap_limit=80.0, hard_limit=50.0)
+        assert row.share_hard_limit_taper is False
+
+    def test_taper_needs_a_number_and_is_not_pace(self, owner_env, fake_pool):
+        s, client, session = owner_env
+        fake_pool.taper = True
+        sync = PoolSync(s, client, session, machine_id=MID)
+        with pytest.raises(PoolError, match="needs a hard limit"):
+            sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None, hard_taper=True)
+        fake_pool.schema_version = "2"
+        with pytest.raises(PoolError, match="pace or taper"):
+            sync.publish_slot("1", shared=True, swap_limit=None, hard_limit=None,
+                              hard_pace=True, hard_taper=True)
+
     def test_someone_elses_account_is_refused(self, owner_env, fake_pool, borrower):
         s, client, session = owner_env
         theirs = _publish_row(fake_pool, client, borrower, "acct-mine", "rt-0", 500)

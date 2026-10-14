@@ -166,3 +166,56 @@ def test_snapshot_reads_pool_ownership_and_shared_flag(temp_home, mock_claude_co
     switcher.set_slot_pool_info("1", None, False)
     account = switcher.accounts_snapshot(fetch=set()).accounts[0]
     assert account.is_mine and account.pool_shared is None
+
+
+def _usage_entry(pct5, pct7, hours7, *, age=0.0):
+    from datetime import datetime, timezone
+
+    from claude_swap.usage_store import UsageEntry
+
+    now = time.time()
+    reset = datetime.fromtimestamp(now + hours7 * 3600, tz=timezone.utc).isoformat()
+    usage = {"five_hour": {"pct": pct5}, "seven_day": {"pct": pct7, "resets_at": reset}}
+    return UsageEntry(last_good=usage, fetched_at=now - age, age_s=age)
+
+
+def test_status_says_why_and_when_a_blocked_account_is_back():
+    from claude_swap import recommend
+    from claude_swap.tui.browser import account_state
+
+    now = time.time()
+    blocked = make_account(3, entry=_usage_entry(0, 95, 29.5))
+    outlook = recommend.outlook(blocked.usage.last_good, None, (), now)
+    assert account_state(blocked, outlook, now) == "7d limit · back in 1d 5h"
+    stale = make_account(4, entry=_usage_entry(0, 10, 100, age=900))
+    outlook = recommend.outlook(stale.usage.last_good, None, (), now)
+    assert account_state(stale, outlook, now) == "Ready *"
+
+
+def test_best_pick_marks_the_most_perishable_account_under_smart():
+    from claude_swap.tui.widgets import best_pick
+
+    snap = AccountsSnapshot(
+        active_number="1",
+        accounts=(
+            make_account(1, active=True, entry=_usage_entry(0, 0, 160)),
+            make_account(2, entry=_usage_entry(0, 60, 8)),
+        ),
+        taken_at=time.time(),
+    )
+    app = type("App", (), {"routing_strategy": "smart", "routing_models": ()})()
+    assert best_pick(app, snap, time.time())[0] == "2"
+    app.routing_strategy = "best"
+    assert best_pick(app, snap, time.time())[0] == "1"
+
+
+def test_the_star_never_changes_a_cards_height():
+    """The macOS panel sizes itself on a fixed card height."""
+    from claude_swap.tui.widgets import account_card_text
+
+    acc = make_account(2, active=True, entry=_usage_entry(10, 10, 100))
+    for width in (60, 102, 140):
+        plain = account_card_text(acc, width).plain
+        starred = account_card_text(acc, width, pick="reason").plain
+        assert starred.count("\n") == plain.count("\n")
+        assert starred.startswith("★ 2 ")

@@ -232,6 +232,11 @@ def pool_command(argv: list[str]) -> None:
         "--hard-limit", metavar="PCT|pace", nargs="?", const="pace",
         help="'pace' (the bare flag): the share of the week that has passed; or 1-100, or 'off'",
     )
+    p_share.add_argument(
+        "--taper", action="store_true",
+        help="The hard limit's reserve shrinks with the week left: 100 - (100 - limit) x "
+             "share of the week left (50%% with 40%% of the week left: 80%%)",
+    )
     p_share.add_argument("--private", action="store_true", help="Publish for your own machines only")
 
     p_unshare = sub.add_parser("unshare", help="Withdraw an account from the pool")
@@ -329,7 +334,8 @@ def _share(switcher: ClaudeAccountSwitcher, args) -> None:
     hard = parse_hard_limit(args.hard_limit) if args.hard_limit is not None else None
     row = sync.publish_slot(num, shared=not args.private, swap_limit=swap,
                             hard_limit=None if hard in (None, 100.0, PACE) else hard,
-                            hard_pace=hard is PACE)
+                            hard_pace=hard is PACE,
+                            hard_taper=bool(getattr(args, "taper", False)))
     print(f"{accent('Shared' if row.shared else 'Published (private)')} {row.email}"
           + (f"  swap {row.share_swap_limit:g}" if row.share_swap_limit else "")
           + share_hard_label(row))
@@ -339,7 +345,8 @@ def share_hard_label(row) -> str:
     """``"  hard pace"`` / ``"  hard 50"`` / ``""`` for a pool row's hard limit."""
     if row.share_hard_limit_pace:
         return "  hard pace" + (f" ≤{row.share_hard_limit:g}" if row.share_hard_limit else "")
-    return f"  hard {row.share_hard_limit:g}" if row.share_hard_limit else ""
+    taper = " taper" if row.share_hard_limit_taper else ""
+    return f"  hard {row.share_hard_limit:g}{taper}" if row.share_hard_limit else ""
 
 
 def _unshare(switcher: ClaudeAccountSwitcher, args) -> None:

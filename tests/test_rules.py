@@ -193,3 +193,75 @@ class TestPaceResolution:
         resolved = resolve_rule(AccountRule(hard_pace=True), usage, self.NOW)
         assert cap_headroom(30.0, resolved) == pytest.approx(-10.0)  # over the pace cap
         assert effective_threshold(resolved, 90.0) == 100.0  # only the hard-limit escape
+
+
+class TestTaper:
+    """A tapered hard limit keeps the owner's reserve (100 - limit) only for
+    the share of the week still left: 100 - (100 - limit) x left."""
+
+    NOW = 1_800_000_000.0
+    WEEK = 7 * 86400.0
+
+    def test_the_formula(self):
+        from claude_swap.rules import taper_limit
+
+        assert taper_limit(50.0, 0.0) == 50.0           # right after a reset: the number
+        assert taper_limit(50.0, 60.0) == pytest.approx(80.0)  # 40% left -> 80%
+        assert taper_limit(70.0, 60.0) == pytest.approx(88.0)
+        assert taper_limit(50.0, 100.0) == 100.0        # at the reset: nothing held back
+
+    def test_resolve_applies_it_and_drops_the_flag(self):
+        usage = _week(10.0, 0.4 * self.WEEK, self.NOW)  # 60% through the week
+        resolved = resolve_rule(AccountRule(hard_limit=50.0, hard_taper=True), usage, self.NOW)
+        assert resolved.hard_limit == pytest.approx(80.0) and not resolved.hard_taper
+
+    def test_unknown_progress_keeps_the_plain_number(self):
+        rule = AccountRule(hard_limit=50.0, hard_taper=True)
+        assert resolve_rule(rule, {"seven_day": {"pct": 10.0}}, self.NOW) == AccountRule(hard_limit=50.0)
+
+    def test_record_round_trip_and_exclusive_with_pace(self):
+        from claude_swap.rules import PACE
+
+        record: dict = {}
+        rule = apply_rule(record, hard_limit=50.0, hard_taper=True)
+        assert record == {"hardLimit": 50.0, "hardLimitTaper": True}
+        assert rule_from_record(record) == rule
+        apply_rule(record, hard_limit=PACE)           # pace turns taper off
+        assert record == {"hardLimitPace": True}
+        apply_rule(record, hard_limit=40.0, hard_taper=True)  # and taper turns pace off
+        assert record == {"hardLimit": 40.0, "hardLimitTaper": True}
+        apply_rule(record, hard_limit=60.0)           # a new number keeps the taper
+        assert record == {"hardLimit": 60.0, "hardLimitTaper": True}
+
+    def test_summary_shows_the_limit_in_force(self):
+        rule = AccountRule(hard_limit=50.0, hard_taper=True)
+        assert rule.summary() == "hard 50% taper"
+        assert rule.summary(progress=60.0) == "hard 50% taper (now 80%)"
+
+    def test_split_taper(self):
+        from claude_swap.rules import split_taper
+
+        assert split_taper("50 taper") == ("50", True)
+        assert split_taper("taper 50") == ("50", True)
+        assert split_taper("50") == ("50", False)
+        assert split_taper(None) == (None, False)
+
+    def test_taper_is_refused_rather_than_dropping_a_limit(self):
+        from claude_swap.rules import PACE
+
+        with pytest.raises(ValueError, match="pace or taper"):
+            apply_rule({}, hard_limit=PACE, hard_taper=True)
+        paced = {"hardLimitPace": True}
+        with pytest.raises(ValueError, match="pace or taper"):
+            apply_rule(paced, hard_taper=True)          # `cswap rule N --taper` on a pace rule
+        assert paced == {"hardLimitPace": True}
+        with pytest.raises(ValueError, match="below 100"):
+            apply_rule({}, hard_taper=True)              # nothing to taper from
+
+    def test_clearing_the_number_clears_the_taper(self):
+        record: dict = {}
+        apply_rule(record, hard_limit=50.0, hard_taper=True)
+        apply_rule(record, hard_limit=100.0)             # `--hard-limit off`
+        assert record == {}
+        apply_rule(record, hard_limit=70.0)              # a later number stays fixed
+        assert record == {"hardLimit": 70.0}

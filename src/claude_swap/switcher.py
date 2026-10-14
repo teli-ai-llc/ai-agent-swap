@@ -25,7 +25,7 @@ from claude_swap.exceptions import (
     SwitchError,
     ValidationError,
 )
-from claude_swap import oauth, pace
+from claude_swap import oauth, pace, recommend
 from claude_swap.claude_locks import claude_config_lock, claude_credentials_lock
 from claude_swap.json_output import (
     SCHEMA_VERSION,
@@ -137,6 +137,9 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
     # Collect (label, body) rows first, then pad every label to the widest one so
     # per-model names (e.g. "Fable") don't shift the columns of the other lines.
     rows: list[tuple[str, str]] = []
+    # A window whose reset already passed is back at 0% (recommend.py): say
+    # so instead of the old pct with "in 0m".
+    usage, _ = recommend.project_resets(usage, time.time())
     spend = usage.get("spend")
     if spend:
         used = spend["used"]
@@ -151,7 +154,9 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
         if w:
             # Pace only applies to the weekly (7d) window, never 5h (issue #125).
             marker = _pace_marker(w, fetched_at) if label == "7d" else ""
-            cell = oauth.fresh_reset_strings(w)
+            if w.get("rolled"):
+                marker = "  (just reset)"
+            cell = oauth.fresh_reset_strings(w) if w.get("resets_at") or not w.get("rolled") else None
             if cell:
                 countdown, clock = cell
                 rows.append((label, f"{w['pct']:>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
@@ -161,6 +166,8 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
         # Per-model weekly limits (e.g. Fable). Flag ones at/over the limit so a
         # maxed model — the usual reason to switch — stands out.
         marker = "  (!)" if w["pct"] >= 100 else _pace_marker(w, fetched_at)
+        if w.get("rolled"):
+            marker = "  (just reset)"
         cell = oauth.fresh_reset_strings(w)
         if cell:
             countdown, clock = cell
@@ -1847,6 +1854,52 @@ class ClaudeAccountSwitcher:
         self._poll_inputs_cache = (mtime, inputs)
         return inputs
 
+    def routing_strategy(self) -> str:
+        """The configured auto-switch strategy (``best`` when unreadable)."""
+        try:
+            return load_settings(self.backup_dir).strategy
+        except Exception:  # noqa: BLE001 - display/ranking must never fail here
+            return "best"
+
+    def best_pick(
+        self,
+        accounts_info: list | None = None,
+        entries: dict[str, UsageEntry] | None = None,
+    ) -> tuple[str | None, dict[str, recommend.Outlook]]:
+        """``(best pick, every account's outlook)`` under the configured
+        strategy and models (recommend.py) — the ★ the list views show.
+
+        Reads the stored usage (no fetch) unless ``entries`` is given. Only
+        accounts in rotation can be the pick: switchable, not disabled, OAuth,
+        with a readable last measurement.
+        """
+        accounts_info = accounts_info or self._build_accounts_info()
+        if entries is None:
+            entries = self._collect_usage_entries(accounts_info, fetch=set())
+        data = self._get_sequence_data() or {}
+        threshold, models = self._poll_policy_inputs()
+        now = self._usage_store.clock()
+        rules = self.account_rules()
+        outlooks: dict[str, recommend.Outlook] = {}
+        eligible: dict[str, tuple[dict, AccountRule]] = {}
+        for info in accounts_info:
+            num = str(info[0])
+            entry = entries.get(num)
+            usage = None if entry is None or entry.sentinel else entry.last_good
+            rule = resolve_rule(rules.get(num, AccountRule()), usage, now)
+            outlooks[num] = recommend.outlook(usage, rule, models, now)
+            if (
+                isinstance(usage, dict)
+                and self._account_is_switchable(num)
+                and not self._disabled_from_data(data, num)
+                and self.account_kind_for(num) != "api_key"
+            ):
+                eligible[num] = (usage, rule)
+        pick = recommend.best(
+            eligible, models, now, strategy=self.routing_strategy(), threshold=threshold
+        )
+        return (pick[0] if pick else None), outlooks
+
     def switchable_account_numbers(self) -> list[str]:
         """Account numbers in rotation order eligible for automatic selection.
 
@@ -1994,6 +2047,7 @@ class ClaudeAccountSwitcher:
         priority=KEEP,
         reset: bool = False,
         quiet: bool = False,
+        hard_taper=KEEP,
     ) -> tuple[str, str, AccountRule]:
         """Set (or clear) a slot's swap limit / hard limit / priority.
 
@@ -2017,6 +2071,7 @@ class ClaudeAccountSwitcher:
             record,
             swap_limit=swap_limit,
             hard_limit=hard_limit,
+            hard_taper=hard_taper,
             priority=priority,
             reset=reset,
         )
@@ -5485,6 +5540,24 @@ class ClaudeAccountSwitcher:
             # better. Stay rather than risk moving onto a worse account.
             return None, "current-unavailable"
 
+        strategy = self.routing_strategy()
+        if strategy in ("smart", "consume-first"):
+            # The same pick every surface stars (recommend.py), so "Switch to
+            # best → ★ X" lands on X. Nothing landable falls through to the
+            # headroom logic below, which tells exhausted from unknown.
+            pick = recommend.best(
+                {
+                    num: (usage.get(num), rule_of(num))
+                    for num in [*others, str(current_num)]
+                },
+                models,
+                now,
+                strategy=strategy,
+                threshold=self._poll_policy_inputs()[0],
+            )
+            if pick is not None:
+                return (None, "stay") if pick[0] == str(current_num) else (pick[0], "")
+
         scored = [
             (cap_headroom(oauth.account_headroom(usage.get(num), models), rule_of(num)), num)
             for num in others
@@ -5726,11 +5799,14 @@ class ClaudeAccountSwitcher:
 
         accounts_info = self._build_accounts_info()
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
+        # The same pass, for a best_pick() that follows (cswap list --compact).
+        self._last_list_pass = (accounts_info, entries)
 
         if json_output:
             return self._build_list_payload(accounts_info, entries)
 
         seq_data = self._get_sequence_data() or {}
+        picked, outlooks = self.best_pick(accounts_info, entries)
         print(bolded("Accounts:"))
         for i, (num, email, org_name, org_uuid, is_active, _, alias) in enumerate(accounts_info):
             tag = self._get_display_tag(email, org_name, org_uuid)
@@ -5740,16 +5816,21 @@ class ClaudeAccountSwitcher:
                 markers += f" {bold_accent('(active)')}"
             if self._disabled_from_data(seq_data, str(num)):
                 markers += f" {muted('(disabled)')}"
+            if str(num) == picked:
+                markers += f" {bold_accent('★ best pick')}"
             print(f"  {num}: {label} {muted(f'[{tag}]')}{markers}")
             for line in _usage_entry_lines(entries[str(num)]):
                 print(f"     {line}")
+            if str(num) == picked:
+                reason = recommend.reason(outlooks[str(num)], self._usage_store.clock())
+                print(f"     {accent('★ ' + reason)}")
             rule = rule_from_record(seq_data.get("accounts", {}).get(str(num)))
             if not rule.is_default:
                 # `hard pace (61%)`: the week's progress from the usage just
                 # printed, so the cap reads as the number it is right now.
                 progress = (
                     week_progress(entries[str(num)].last_good, self._usage_store.clock())
-                    if rule.hard_pace else None
+                    if rule.hard_pace or rule.hard_taper else None
                 )
                 print(f"     {dimmed('•')} {muted('rule: ' + rule.summary(progress=progress))}")
 

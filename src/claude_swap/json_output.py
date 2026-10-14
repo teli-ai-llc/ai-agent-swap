@@ -248,7 +248,7 @@ def account_row(
     """A full account row for ``--list``. ``backoff_until`` is the live
     backoff only; a lapsed one is the caller's to withhold. ``rules`` is the
     slot's non-default switching rule as ``{swapLimit, hardLimit,
-    hardLimitPace, priority}`` (see ``rules.py``), or None."""
+    hardLimitPace, hardLimitTaper, priority}`` (see ``rules.py``), or None."""
     status, usage = usage_fields(usage_entry, usage_fetched_at)
     row = {
         "number": number,

@@ -7115,3 +7115,173 @@ class TestAccountRules:
             "3", (), {"1": _usage(96), "2": _usage(97), "3": _usage(10)}
         )
         assert (target, note) == (None, "stay")  # no own account is better than 40 pts left
+
+
+# --- smart strategy -------------------------------------------------------------
+
+
+def _usage_in(pct5: float, pct7: float, hours7: float, now: float) -> dict:
+    """5h idle-ish usage whose 7d window resets ``hours7`` after ``now``."""
+    return {
+        "five_hour": {"pct": pct5},
+        "seven_day": {"pct": pct7, "resets_at": _iso_at(now + hours7 * 3600.0)},
+    }
+
+
+class TestSmartStrategy:
+    def _harness(self, temp_home: Path, n: int = 3) -> EngineHarness:
+        h = EngineHarness(temp_home, strategy="smart", threshold=95.0)
+        for i in range(1, n + 1):
+            h.seed(i, f"{chr(96 + i)}@example.com")
+        h.make_live("a@example.com", 1)
+        return h
+
+    def test_below_threshold_moves_to_quota_that_expires_first(self, temp_home):
+        h = self._harness(temp_home)
+        now = h.clock.now
+        outcome = h.tick_with_usage({
+            "1": _usage_in(10, 10, 150, now),  # fresh week, 90% left: ~0.6 %/h
+            "2": _usage_in(0, 60, 8, now),     # 40% left, gone in 8h: 5 %/h
+            "3": _usage_in(0, 0, 160, now),    # most headroom, but not urgent
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+        sw = next(e for e in h.events if isinstance(e, SwitchEvent))
+        assert sw.trigger == "smart"
+
+    def test_stays_when_nothing_is_clearly_more_perishable(self, temp_home):
+        h = self._harness(temp_home)
+        now = h.clock.now
+        outcome = h.tick_with_usage({
+            "1": _usage_in(10, 40, 30, now),   # 60% over 30h: 2 %/h
+            "2": _usage_in(0, 0, 150, now),
+            "3": _usage_in(0, 50, 30, now),    # 50% over 30h: 1.7 %/h
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        reasons = [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert reasons == ["already-on-best"]
+
+    def test_never_lands_on_an_account_near_its_5h_limit(self, temp_home):
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        outcome = h.tick_with_usage({
+            "1": _usage_in(10, 10, 150, now),
+            "2": _usage_in(93, 50, 4, now),    # urgent week, 5h almost spent
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def test_over_threshold_picks_most_perishable_not_most_headroom(self, temp_home):
+        h = self._harness(temp_home)
+        now = h.clock.now
+        outcome = h.tick_with_usage({
+            "1": _usage_in(96, 30, 100, now),  # must leave
+            "2": _usage_in(0, 50, 20, now),    # 50% expiring in 20h: 2.5 %/h
+            "3": _usage_in(0, 0, 160, now),    # most headroom: 0.6 %/h
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_respects_cooldown(self, temp_home):
+        h = self._harness(temp_home)
+        now = h.clock.now
+        h.tick_with_usage({
+            "1": _usage_in(10, 10, 150, now),
+            "2": _usage_in(0, 60, 8, now),
+            "3": _usage_in(0, 0, 160, now),
+        })
+        assert h.active_number() == 2
+        h.events.clear()
+        outcome = h.tick_with_usage({
+            "2": _usage_in(10, 10, 150, now),
+            "1": _usage_in(0, 0, 160, now),
+            "3": _usage_in(0, 70, 2, now),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert "cooldown" in [e.reason for e in h.events if isinstance(e, NoSwitchEvent)]
+
+    def test_owner_hard_limit_caps_what_a_borrowed_account_offers(self, temp_home):
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"]["hardLimit"] = 50.0
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        h.engine = h._make_engine()
+        # 2's week looks urgent (60% left in 8h) but the owner allows only
+        # 50%, so it offers 10% / 8h = 1.25 %/h: not 1.5x the active's.
+        outcome = h.tick_with_usage({
+            "1": _usage_in(10, 10, 100, now),  # 0.9 %/h
+            "2": _usage_in(0, 40, 8, now),
+        })
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+
+    def _rank(self, h: EngineHarness, usage: dict, current: str, **kw):
+        from claude_swap.settings import AutoSwitchSettings
+
+        headroom = h.engine._capped_headroom_by_account(usage)
+        others = [n for n in usage if n != current]
+        args = dict(
+            trigger="smart",
+            consume_first=False,
+            smart=True,
+            oauth_candidates=others,
+            usage=usage,
+            headroom=headroom,
+            current=current,
+            active_headroom=headroom.get(current),
+            settings=AutoSwitchSettings(strategy="smart", threshold=95.0),
+            now=h.clock.now,
+        )
+        args.update(kw)
+        return h.engine._rank_candidates(**args)[0]
+
+    def test_returns_to_the_account_it_left_once_that_quota_is_about_to_expire(
+        self, temp_home
+    ):
+        """The no-return bar's release legs never see urgency; smart may go
+        back when the left account clearly beats the active one."""
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        usage = {
+            "2": _usage_in(0, 0, 160, now),    # active: a fresh week
+            "1": _usage_in(0, 60, 12, now),    # left earlier, 40% now expiring
+        }
+        assert self._rank(h, usage, "2", no_return="1") == ["1"]
+
+    def test_never_moves_off_an_unreadable_active(self, temp_home):
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        usage = {"1": "token-expired", "2": _usage_in(0, 60, 8, now)}
+        assert self._rank(h, usage, "1", no_return=None) == []
+
+    def test_a_tapered_owner_limit_opens_up_late_in_the_week(self, temp_home):
+        """50% taper with 40% of the week left is an 80% cap: an account at
+        65% used still offers 15 points, so it is somewhere to go when the
+        active account runs out (untapered, the same account is spent)."""
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"].update({"hardLimit": 50.0, "hardLimitTaper": True})
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        h.engine = h._make_engine()
+        outcome = h.tick_with_usage({
+            "1": _usage_in(96, 10, 150, now),          # at its 5h limit: must move
+            "2": _usage_in(0, 65, 0.4 * 168, now),     # 15 pts under the taper, 67h left
+        })
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() == 2
+
+    def test_the_same_account_untapered_is_at_its_limit(self, temp_home):
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        data = h.switcher._get_sequence_data()
+        data["accounts"]["2"].update({"hardLimit": 50.0})
+        h.switcher._write_json(h.switcher.sequence_file, data)
+        h.engine = h._make_engine()
+        outcome = h.tick_with_usage({
+            "1": _usage_in(96, 10, 150, now),
+            "2": _usage_in(0, 65, 0.4 * 168, now),     # past its fixed 50%
+        })
+        assert outcome is not TickOutcome.SWITCHED

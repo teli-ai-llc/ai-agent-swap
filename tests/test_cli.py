@@ -1464,7 +1464,8 @@ class TestAliasCommand:
         payload = _json.loads(capsys.readouterr().out)
         assert payload["rules"] == [{
             "number": 2, "email": "work@co.com",
-            "swapLimit": 95.0, "hardLimit": 50.0, "hardLimitPace": False, "priority": 2,
+            "swapLimit": 95.0, "hardLimit": 50.0, "hardLimitPace": False,
+            "hardLimitTaper": False, "priority": 2,
         }]
 
     def test_rule_bare_hard_limit_flag_means_pace(self, temp_home, capsys):
