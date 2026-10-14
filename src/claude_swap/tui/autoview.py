@@ -288,6 +288,8 @@ class AutoScreen(Screen):
         chosen = options[(index + 1) % len(options)]
         self._settings = replace(self._settings, model=chosen)
         self._persist("autoswitch.model", chosen)
+        # the ★ on every screen ranks on the same window set
+        self.app.routing_models = parse_model_names(chosen)
         if self._engine is not None:
             self._restart_engine(dry_run=self._engine.dry_run)
         self._update_summary()
@@ -402,9 +404,13 @@ class AutoScreen(Screen):
         models = parse_model_names(self._settings.model) if self._settings else ()
         strategy = self._settings.strategy if self._settings else "best"
         now = time.time()
+        # The engine's candidate set: in rotation, OAuth.
         rows = [
             acc for acc in snap.accounts
-            if acc.number != active_number and acc.switchable
+            if acc.number != active_number
+            and acc.switchable
+            and not acc.disabled
+            and acc.kind == "oauth"
         ]
         text = Text()
         text.append("Next best", style=palette.muted)
@@ -425,9 +431,11 @@ class AutoScreen(Screen):
             )
             for acc in rows
         }
-        ranked = recommend.rank(accounts, models, now, strategy=strategy)
+        threshold = self._settings.threshold if self._settings else None
+        ranked = recommend.rank(accounts, models, now, strategy=strategy, threshold=threshold)
         by_number = {acc.number: acc for acc in rows}
-        top = ranked[0][0] if ranked and ranked[0][1].usable else None
+        pick = recommend.best(accounts, models, now, strategy=strategy, threshold=threshold)
+        top = pick[0] if pick else None
         for number, outlook in ranked:
             acc = by_number[number]
             rule = accounts[number][1]
@@ -461,7 +469,4 @@ class AutoScreen(Screen):
             if rule.priority != 1:
                 entry.append(f"  p{rule.priority}", style=palette.muted)
             text.append(entry)
-        return text
-        for _key, number in sorted(ranked):
-            text.append(lines[number])
         return text

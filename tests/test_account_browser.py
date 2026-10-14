@@ -207,3 +207,15 @@ def test_best_pick_marks_the_most_perishable_account_under_smart():
     assert best_pick(app, snap, time.time())[0] == "2"
     app.routing_strategy = "best"
     assert best_pick(app, snap, time.time())[0] == "1"
+
+
+def test_the_star_never_changes_a_cards_height():
+    """The macOS panel sizes itself on a fixed card height."""
+    from claude_swap.tui.widgets import account_card_text
+
+    acc = make_account(2, active=True, entry=_usage_entry(10, 10, 100))
+    for width in (60, 102, 140):
+        plain = account_card_text(acc, width).plain
+        starred = account_card_text(acc, width, pick="reason").plain
+        assert starred.count("\n") == plain.count("\n")
+        assert starred.startswith("★ 2 ")

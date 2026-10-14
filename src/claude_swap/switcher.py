@@ -1877,7 +1877,7 @@ class ClaudeAccountSwitcher:
         if entries is None:
             entries = self._collect_usage_entries(accounts_info, fetch=set())
         data = self._get_sequence_data() or {}
-        _, models = self._poll_policy_inputs()
+        threshold, models = self._poll_policy_inputs()
         now = self._usage_store.clock()
         rules = self.account_rules()
         outlooks: dict[str, recommend.Outlook] = {}
@@ -1895,7 +1895,9 @@ class ClaudeAccountSwitcher:
                 and self.account_kind_for(num) != "api_key"
             ):
                 eligible[num] = (usage, rule)
-        pick = recommend.best(eligible, models, now, strategy=self.routing_strategy())
+        pick = recommend.best(
+            eligible, models, now, strategy=self.routing_strategy(), threshold=threshold
+        )
         return (pick[0] if pick else None), outlooks
 
     def switchable_account_numbers(self) -> list[str]:
@@ -5536,9 +5538,10 @@ class ClaudeAccountSwitcher:
             # better. Stay rather than risk moving onto a worse account.
             return None, "current-unavailable"
 
-        if self.routing_strategy() == "smart":
-            # The same pick every surface shows (recommend.py): the most
-            # perishable usable quota. Nothing usable falls through to the
+        strategy = self.routing_strategy()
+        if strategy in ("smart", "consume-first"):
+            # The same pick every surface stars (recommend.py), so "Switch to
+            # best → ★ X" lands on X. Nothing landable falls through to the
             # headroom logic below, which tells exhausted from unknown.
             pick = recommend.best(
                 {
@@ -5547,6 +5550,8 @@ class ClaudeAccountSwitcher:
                 },
                 models,
                 now,
+                strategy=strategy,
+                threshold=self._poll_policy_inputs()[0],
             )
             if pick is not None:
                 return (None, "stay") if pick[0] == str(current_num) else (pick[0], "")
@@ -5792,6 +5797,8 @@ class ClaudeAccountSwitcher:
 
         accounts_info = self._build_accounts_info()
         entries = self._collect_usage_entries(accounts_info, fetch=fetch)
+        # The same pass, for a best_pick() that follows (cswap list --compact).
+        self._last_list_pass = (accounts_info, entries)
 
         if json_output:
             return self._build_list_payload(accounts_info, entries)

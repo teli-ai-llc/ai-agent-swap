@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 
 from claude_swap import oauth
 from claude_swap.poll_policy import parse_reset_ts
-from claude_swap.rules import AccountRule, resolve_rule
+from claude_swap.rules import AccountRule, effective_threshold, resolve_rule
 
 FIVE_HOUR_S = 5 * 3600.0
 WEEK_S = 7 * 86400.0
@@ -155,11 +155,23 @@ def outlook(
     )
 
 
-def sort_key(o: Outlook, priority: int = 0, strategy: str = "smart") -> tuple:
-    """Ascending sort key: usable first, then rule priority, then the
-    strategy's order — the most perishable quota (``smart``), the soonest
-    weekly reset (``consume-first``) or the most headroom (``best``) — with
-    the most headroom breaking ties."""
+def landable(o: Outlook, rule: AccountRule | None, threshold: float | None) -> bool:
+    """Usable AND below the account's own swap point (the engine's landing
+    gate): landing above it would only switch straight back out."""
+    if not o.usable:
+        return False
+    if threshold is None or o.headroom is None:
+        return True
+    return 100.0 - o.headroom < effective_threshold(rule or AccountRule(), threshold)
+
+
+def sort_key(
+    o: Outlook, priority: int = 0, strategy: str = "smart", ok: bool | None = None
+) -> tuple:
+    """Ascending sort key: landable (``ok``, default ``o.usable``) first, then
+    rule priority, then the strategy's order — the most perishable quota
+    (``smart``), the soonest weekly reset (``consume-first``) or the most
+    headroom (``best``) — with the most headroom breaking ties."""
     headroom = -(o.headroom if o.headroom is not None else -1e9)
     if strategy == "best":
         order: float = headroom
@@ -167,7 +179,7 @@ def sort_key(o: Outlook, priority: int = 0, strategy: str = "smart") -> tuple:
         order = o.weekly_reset_ts if o.weekly_reset_ts is not None else float("inf")
     else:
         order = -(o.urgency or 0.0)
-    return (0 if o.usable else 1, priority, order, headroom)
+    return (0 if (o.usable if ok is None else ok) else 1, priority, order, headroom)
 
 
 def beats(candidate: Outlook, active: Outlook) -> bool:
@@ -181,23 +193,38 @@ def beats(candidate: Outlook, active: Outlook) -> bool:
     )
 
 
+def _scored(
+    accounts: Mapping[str, tuple[dict | str | None, AccountRule | None]],
+    models: Sequence[str],
+    now: float,
+    exclude: Iterable[str],
+    strategy: str,
+    threshold: float | None,
+) -> list[tuple[str, Outlook, bool]]:
+    skip = set(exclude)
+    scored = []
+    for num, (usage, rule) in accounts.items():
+        if num in skip:
+            continue
+        o = outlook(usage, rule, models, now)
+        ok = landable(o, rule, threshold)
+        scored.append((sort_key(o, (rule or AccountRule()).priority, strategy, ok), num, o, ok))
+    scored.sort(key=lambda t: t[0])
+    return [(num, o, ok) for _key, num, o, ok in scored]
+
+
 def rank(
     accounts: Mapping[str, tuple[dict | str | None, AccountRule | None]],
     models: Sequence[str],
     now: float,
     exclude: Iterable[str] = (),
     strategy: str = "smart",
+    threshold: float | None = None,
 ) -> list[tuple[str, Outlook]]:
     """Every account, best pick first. ``accounts`` maps number →
-    ``(usage, rule)``. Unreadable accounts sort last."""
-    skip = set(exclude)
-    scored = [
-        (num, outlook(usage, rule, models, now), (rule or AccountRule()).priority)
-        for num, (usage, rule) in accounts.items()
-        if num not in skip
-    ]
-    scored.sort(key=lambda t: sort_key(t[1], t[2], strategy))
-    return [(num, o) for num, o, _ in scored]
+    ``(usage, rule)``. Accounts that cannot be landed on (unreadable, at a
+    limit, or past their own swap point given ``threshold``) sort last."""
+    return [(num, o) for num, o, _ in _scored(accounts, models, now, exclude, strategy, threshold)]
 
 
 def best(
@@ -206,11 +233,12 @@ def best(
     now: float,
     exclude: Iterable[str] = (),
     strategy: str = "smart",
+    threshold: float | None = None,
 ) -> tuple[str, Outlook] | None:
-    """The recommended account, or None when nothing is usable."""
-    ranked = rank(accounts, models, now, exclude, strategy)
-    if ranked and ranked[0][1].usable:
-        return ranked[0]
+    """The recommended account, or None when nothing can be landed on."""
+    ranked = _scored(accounts, models, now, exclude, strategy, threshold)
+    if ranked and ranked[0][2]:
+        return ranked[0][0], ranked[0][1]
     return None
 
 
@@ -219,6 +247,7 @@ def snapshot_pick(
     models: Sequence[str],
     now: float,
     strategy: str = "smart",
+    threshold: float | None = None,
 ) -> tuple[str | None, dict[str, Outlook]]:
     """``(best pick, every account's outlook)`` for a UI snapshot.
 
@@ -240,7 +269,7 @@ def snapshot_pick(
             and isinstance(usage, dict)
         ):
             eligible[acc.number] = (usage, rule)
-    pick = best(eligible, models, now, strategy=strategy)
+    pick = best(eligible, models, now, strategy=strategy, threshold=threshold)
     return (pick[0] if pick else None), outlooks
 
 

@@ -2025,7 +2025,23 @@ class AutoSwitchEngine:
             any_known = True          # it EXISTS and is readable either way
             if h <= 0:
                 continue  # itself at its limit — never a target
-            if num == no_return:
+            cand_outlook = (
+                recommend.outlook(usage.get(num), self._rule_for(num), self._models, now)
+                if smart
+                else None
+            )
+            if num == no_return and not (
+                # The bar's release legs (headroom up, reset nearer) never
+                # see urgency, which grows as a reset approaches: the left
+                # account's quota running out is exactly smart's reason to
+                # return. beats() is one-directional (1.5x), so it cannot
+                # flap; cooldown still bounds the rate.
+                trigger == "smart"
+                and cand_outlook is not None
+                and active_outlook is not None
+                and active_outlook.headroom is not None
+                and recommend.beats(cand_outlook, active_outlook)
+            ):
                 continue  # the account we just left; see _no_return_account
             reset_ts = (
                 _seven_day_reset_ts(usage.get(num), now) if consume_first else None
@@ -2034,11 +2050,6 @@ class AutoSwitchEngine:
                 _binding_recovery_ts(usage.get(num), self._models, now)
                 if all_above
                 else 0.0
-            )
-            cand_outlook = (
-                recommend.outlook(usage.get(num), self._rule_for(num), self._models, now)
-                if smart
-                else None
             )
             if trigger in _PROACTIVE_TRIGGERS:
                 # Landing must be healthy: an account at/over ITS threshold
@@ -2107,8 +2118,12 @@ class AutoSwitchEngine:
                     # perishable quota (the ratio is also the anti-flap).
                     if cand_outlook is None or not cand_outlook.usable:
                         continue
-                    if trigger == "smart" and not recommend.beats(
-                        cand_outlook, active_outlook
+                    if trigger == "smart" and (
+                        # An unreadable active (e.g. the phase-2 refetch came
+                        # back as a sentinel) is no evidence anything beats it.
+                        active_outlook is None
+                        or active_outlook.headroom is None
+                        or not recommend.beats(cand_outlook, active_outlook)
                     ):
                         continue
                 elif consume_first:

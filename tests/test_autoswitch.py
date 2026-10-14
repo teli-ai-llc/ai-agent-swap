@@ -7216,3 +7216,42 @@ class TestSmartStrategy:
         })
         assert outcome is TickOutcome.NO_ACTION
         assert h.active_number() == 1
+
+    def _rank(self, h: EngineHarness, usage: dict, current: str, **kw):
+        from claude_swap.settings import AutoSwitchSettings
+
+        headroom = h.engine._capped_headroom_by_account(usage)
+        others = [n for n in usage if n != current]
+        args = dict(
+            trigger="smart",
+            consume_first=False,
+            smart=True,
+            oauth_candidates=others,
+            usage=usage,
+            headroom=headroom,
+            current=current,
+            active_headroom=headroom.get(current),
+            settings=AutoSwitchSettings(strategy="smart", threshold=95.0),
+            now=h.clock.now,
+        )
+        args.update(kw)
+        return h.engine._rank_candidates(**args)[0]
+
+    def test_returns_to_the_account_it_left_once_that_quota_is_about_to_expire(
+        self, temp_home
+    ):
+        """The no-return bar's release legs never see urgency; smart may go
+        back when the left account clearly beats the active one."""
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        usage = {
+            "2": _usage_in(0, 0, 160, now),    # active: a fresh week
+            "1": _usage_in(0, 60, 12, now),    # left earlier, 40% now expiring
+        }
+        assert self._rank(h, usage, "2", no_return="1") == ["1"]
+
+    def test_never_moves_off_an_unreadable_active(self, temp_home):
+        h = self._harness(temp_home, n=2)
+        now = h.clock.now
+        usage = {"1": "token-expired", "2": _usage_in(0, 60, 8, now)}
+        assert self._rank(h, usage, "1", no_return=None) == []

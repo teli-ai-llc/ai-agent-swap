@@ -135,3 +135,14 @@ class TestText:
     def test_reason_for_a_blocked_account_says_when_it_returns(self):
         o = recommend.outlook(_u(97, 10, 100, hours5=2), None, (), NOW)
         assert recommend.reason(o, NOW) == "5h limit · back in 2h 0m"
+
+
+class TestLandable:
+    def test_an_account_past_its_own_swap_point_is_not_the_pick(self):
+        rule = AccountRule(swap_limit=70.0)
+        accounts = {
+            "1": (_u(0, 75, 8), rule),     # urgent, but past its 70% swap point
+            "2": (_u(0, 0, 160), None),
+        }
+        assert recommend.best(accounts, (), NOW, threshold=95.0)[0] == "2"
+        assert recommend.best(accounts, (), NOW)[0] == "1"  # no threshold: no gate

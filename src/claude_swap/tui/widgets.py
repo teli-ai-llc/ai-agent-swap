@@ -229,6 +229,7 @@ def best_pick(app, snap, now: float) -> tuple[str | None, dict]:
         getattr(app, "routing_models", ()),
         now,
         getattr(app, "routing_strategy", "best"),
+        getattr(app, "threshold_pct", None),
     )
 
 
@@ -280,12 +281,18 @@ def account_card_text(
     carry the account's own swap threshold tick and, if it has one, a
     critical-colored hard-limit tick (rules.py), plus a time marker. ``pick``
     is set (the recommendation's reason, recommend.py) when this account is
-    the best pick: the header gets a ★, and the card keeps its height, which
-    the menu bar panel's sizing relies on."""
+    the best pick: its number gets a ★ in place of padding, so the card keeps
+    its height, which the menu bar panel's sizing relies on."""
     now = now if now is not None else time.time()
 
     text = Text()
-    text.append(f"{acc.number:>2}  ", style=f"bold {palette.foreground}")
+    if pick is not None:
+        # In the number's own slot ("★ 2 " is as wide as " 2  "), so the
+        # header never grows and the card keeps its height.
+        text.append("★", style=f"bold {palette.sev_ok}")
+        text.append(f"{acc.number:>2} ", style=f"bold {palette.sev_ok}")
+    else:
+        text.append(f"{acc.number:>2}  ", style=f"bold {palette.foreground}")
     if acc.alias:
         text.append(acc.alias, style=f"bold {palette.accent}")
         text.append(f" ({acc.email})", style=palette.foreground)
@@ -296,8 +303,6 @@ def account_card_text(
         text.append("   ● active", style=f"bold {palette.accent}")
     if acc.disabled:
         text.append("   (disabled)", style=palette.muted)
-    if pick is not None:
-        text.append("   ★ best pick", style=f"bold {palette.sev_ok}")
 
     # The rule chips, the over-limit marker and the age note are one group.
     # It sits at the end of the header line when the whole line fits; when
@@ -400,8 +405,9 @@ def mini_account_text(
     """
     text = Text(no_wrap=True, overflow="ellipsis")
     if pick:
-        text.append("★ ", style=f"bold {palette.sev_ok}")
-    text.append(f"{acc.number:>2}  ", style=f"bold {palette.muted}")
+        text.append(f"★{acc.number:>2} ", style=f"bold {palette.sev_ok}")
+    else:
+        text.append(f"{acc.number:>2}  ", style=f"bold {palette.muted}")
     if acc.alias:
         text.append(acc.alias, style=f"bold {palette.accent}")
         text.append(f" ({acc.email})", style=palette.foreground)

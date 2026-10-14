@@ -1703,7 +1703,9 @@ The original flag spellings (%(prog)s --switch, %(prog)s --list, ...) keep worki
                     scope=args.scope or "all", search=args.search or "",
                 )
                 from claude_swap import recommend
-                picked, outlooks = switcher.best_pick()
+                picked, outlooks = switcher.best_pick(
+                    *(getattr(switcher, "_last_list_pass", None) or ())
+                )
                 if picked is not None:
                     payload["bestPick"] = {
                         "number": int(picked),

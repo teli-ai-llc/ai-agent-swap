@@ -105,8 +105,7 @@ TRUST_MAX_AGE_S = 3600.0
 #
 # Fallback ceiling for 429-stale data that carries no resets_at (older stored
 # rows): still bounded so it can't be trusted forever. Non-429 failures always
-# use TRUST_MAX_AGE_S (a timeout/network error is no evidence last_good holds),
-# and are likewise never trusted past the snapshot's soonest reset.
+# use TRUST_MAX_AGE_S (a timeout/network error is no evidence last_good holds).
 RATE_LIMIT_TRUST_MAX_AGE_S = 7200.0
 
 # Failure backoff when the server sent no Retry-After: 30s · 2^(n-1), capped.
@@ -953,23 +952,7 @@ class UsageStore:
                     models,
                 )
             else:
-                # While fetches are failing, never past the snapshot's own
-                # soonest reset either: once a window rolls over its old pct
-                # is obsolete, and trusting it would skip a just-refilled
-                # account for up to an hour. (Healthy rows are re-polled
-                # within a minute of a reset by the scheduler.)
-                soonest = (
-                    _earliest_reset(
-                        last_good if isinstance(last_good, dict) else None, models
-                    )
-                    if consecutive_failures > 0
-                    else None
-                )
-                within_ceiling = (
-                    age_s is not None
-                    and age_s <= TRUST_MAX_AGE_S
-                    and (soonest is None or now < soonest)
-                )
+                within_ceiling = age_s is not None and age_s <= TRUST_MAX_AGE_S
             live_claim = _live_claim(claim_until, last_attempt_at, now)
             trust_extended = (
                 within_ceiling

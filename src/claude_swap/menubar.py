@@ -434,7 +434,10 @@ EMPTY_SNAPSHOT: dict = {
 
 
 def _adapt_snapshot(
-    snap, strategy: str = "best", models: tuple[str, ...] = ()
+    snap,
+    strategy: str = "best",
+    models: tuple[str, ...] = (),
+    threshold: float | None = None,
 ) -> dict:
     """Adapt an ``AccountsSnapshot`` to the menu bar's render dict.
 
@@ -462,7 +465,9 @@ def _adapt_snapshot(
     # The ★ best pick (recommend.py): the account the configured strategy
     # would choose, with its one-line reason.
     now = time.time()
-    picked, outlooks = recommend.snapshot_pick(snap.accounts, models, now, strategy)
+    picked, outlooks = recommend.snapshot_pick(
+        snap.accounts, models, now, strategy, threshold
+    )
     pick = None
     if picked is not None:
         acc = next(a for a in snap.accounts if a.number == picked)
@@ -775,13 +780,14 @@ def run(switcher) -> int:
             except Exception:
                 return 0
 
-        def _routing(self) -> tuple[str, tuple[str, ...]]:
-            """The auto-switch strategy and models the ★ best pick ranks by."""
+        def _routing(self) -> tuple[str, tuple[str, ...], float | None]:
+            """The auto-switch strategy, models and threshold the ★ best
+            pick ranks by (re-read each refresh, so config changes apply)."""
             try:
                 loaded = load_settings(self.switcher.backup_dir)
-                return loaded.strategy, parse_model_names(loaded.model)
+                return loaded.strategy, parse_model_names(loaded.model), loaded.threshold
             except Exception:
-                return "best", ()
+                return "best", (), None
 
         # ---- menu construction -----------------------------------------------
         def rebuild_menu(self):
