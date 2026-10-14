@@ -245,3 +245,23 @@ class TestTaper:
         assert split_taper("taper 50") == ("50", True)
         assert split_taper("50") == ("50", False)
         assert split_taper(None) == (None, False)
+
+    def test_taper_is_refused_rather_than_dropping_a_limit(self):
+        from claude_swap.rules import PACE
+
+        with pytest.raises(ValueError, match="pace or taper"):
+            apply_rule({}, hard_limit=PACE, hard_taper=True)
+        paced = {"hardLimitPace": True}
+        with pytest.raises(ValueError, match="pace or taper"):
+            apply_rule(paced, hard_taper=True)          # `cswap rule N --taper` on a pace rule
+        assert paced == {"hardLimitPace": True}
+        with pytest.raises(ValueError, match="below 100"):
+            apply_rule({}, hard_taper=True)              # nothing to taper from
+
+    def test_clearing_the_number_clears_the_taper(self):
+        record: dict = {}
+        apply_rule(record, hard_limit=50.0, hard_taper=True)
+        apply_rule(record, hard_limit=100.0)             # `--hard-limit off`
+        assert record == {}
+        apply_rule(record, hard_limit=70.0)              # a later number stays fixed
+        assert record == {"hardLimit": 70.0}

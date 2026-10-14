@@ -8,15 +8,23 @@
 -- otherwise expire unused. Owner-only like the rest of the sharing columns.
 --
 -- Rollout: no schema_version bump. A taper only ever loosens a limit, so a
--- cswap that does not know the column enforces the plain limit (the safe
--- side) and keeps syncing. cswap looks for the `hard_limit_taper` flag in
--- pool_meta before sending the column, and refuses a taper share by name
--- until this has run.
+-- borrower's cswap that does not know the column enforces the plain limit
+-- (the safe side) and keeps syncing. cswap looks for the `hard_limit_taper`
+-- flag in pool_meta before sending the column, and refuses a taper share by
+-- name until this has run.
+--
+-- An owner re-sharing from a machine on an older cswap never sends the
+-- column, so it cannot turn a taper off by itself. The guard clears it
+-- whenever it stops making sense (pace turned on, or no hard limit left);
+-- a re-share to a different plain number from an old machine still keeps
+-- the taper, so owners who taper should update cswap on every machine they
+-- share from.
 
 alter table public.pool_accounts
   add column share_hard_limit_taper boolean not null default false;
 
--- Same guard as 0004, with the new column in the owner-only list.
+-- Same guard as 0004, with the new column in the owner-only list and the
+-- taper clean-up below.
 create or replace function public.pool_accounts_guard() returns trigger
 language plpgsql security definer set search_path = public as $$
 declare
@@ -53,6 +61,12 @@ begin
       new.needs_relogin_since := null;
       new.needs_relogin_reported_by := null;
     end if;
+  end if;
+
+  -- taper needs a number to taper from and is exclusive with pace (see the
+  -- rollout note: an older cswap sets pace or clears the limit blind to it)
+  if new.share_hard_limit_pace or new.share_hard_limit is null then
+    new.share_hard_limit_taper := false;
   end if;
 
   if new.status = 'needs_relogin' and old.status <> 'needs_relogin' then

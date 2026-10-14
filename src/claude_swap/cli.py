@@ -669,15 +669,18 @@ Examples:
             prio = KEEP if args.priority is None else parse_priority(args.priority)
         except ValueError as exc:
             parser.error(str(exc))
-        num, email, rule = switcher.set_account_rule(
-            args.account,
-            swap_limit=swap,
-            hard_limit=hard,
-            hard_taper=KEEP if args.taper is None else args.taper,
-            priority=prio,
-            reset=args.reset,
-            quiet=args.json,
-        )
+        try:
+            num, email, rule = switcher.set_account_rule(
+                args.account,
+                swap_limit=swap,
+                hard_limit=hard,
+                hard_taper=KEEP if args.taper is None else args.taper,
+                priority=prio,
+                reset=args.reset,
+                quiet=args.json,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
         if args.json:
             print(json.dumps({
                 "schemaVersion": 1,

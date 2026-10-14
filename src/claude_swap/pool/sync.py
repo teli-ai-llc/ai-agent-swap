@@ -82,6 +82,14 @@ def reconcile_owner_pace(current: bool, previous: bool | None, new: bool,
     return current or new
 
 
+def owner_taper(row: PoolAccountRow) -> bool:
+    """The taper a row actually grants: only with a number to taper from,
+    and never alongside pace (a row can carry both when an older cswap set
+    pace after a taper share; pace wins)."""
+    return (row.share_hard_limit_taper and not row.share_hard_limit_pace
+            and row.share_hard_limit is not None)
+
+
 def reconcile_owner_taper(current: bool, previous: bool | None, new: bool,
                           *, previous_known: bool) -> bool:
     """The taper flag's twin of ``reconcile_owner_pace``, mirrored: off is
@@ -394,25 +402,31 @@ class PoolSync:
             pace = reconcile_owner_pace(rule.hard_pace, record.get(_OWNER_PACE_KEY, False),
                                         row.share_hard_limit_pace, previous_known=known)
             # A record from before migration 0005 remembers no taper: the
-            # owner had none, so "untouched" is a borrower still at off.
-            taper = reconcile_owner_taper(rule.hard_taper, record.get(_OWNER_TAPER_KEY, False),
-                                          row.share_hard_limit_taper, previous_known=known)
+            # owner had none, so "untouched" is a borrower still at off. A
+            # borrower who set their own number keeps it fixed: taper only
+            # follows the owner over the owner's own number.
+            granted = owner_taper(row)
+            taper = reconcile_owner_taper(
+                rule.hard_taper, record.get(_OWNER_TAPER_KEY, False), granted,
+                previous_known=known and current_hard == record.get(_OWNER_HARD_KEY),
+            )
+            taper = taper and not pace and hard is not None
             unchanged = (
                 known and swap == rule.swap_limit and hard == current_hard and pace == rule.hard_pace
                 and taper == rule.hard_taper
                 and record.get(_OWNER_SWAP_KEY) == row.share_swap_limit
                 and record.get(_OWNER_HARD_KEY) == row.share_hard_limit
                 and record.get(_OWNER_PACE_KEY, False) == row.share_hard_limit_pace
-                and record.get(_OWNER_TAPER_KEY, False) == row.share_hard_limit_taper
+                and record.get(_OWNER_TAPER_KEY, False) == granted
             )
             if unchanged:
                 return
             apply_rule(record, swap_limit=swap, hard_limit=100.0 if hard is None else hard,
-                       hard_pace=pace, hard_taper=taper and not pace)
+                       hard_pace=pace, hard_taper=taper)
             record[_OWNER_SWAP_KEY] = row.share_swap_limit
             record[_OWNER_HARD_KEY] = row.share_hard_limit
             record[_OWNER_PACE_KEY] = row.share_hard_limit_pace
-            record[_OWNER_TAPER_KEY] = row.share_hard_limit_taper
+            record[_OWNER_TAPER_KEY] = granted
             data["lastUpdated"] = get_timestamp()
             self.switcher._write_json(self.switcher.sequence_file, data)
 
@@ -455,11 +469,11 @@ class PoolSync:
                 apply_rule(record, priority=2, swap_limit=row.share_swap_limit,
                            hard_limit=row.share_hard_limit if row.share_hard_limit is not None else 100.0,
                            hard_pace=row.share_hard_limit_pace,
-                           hard_taper=row.share_hard_limit_taper and not row.share_hard_limit_pace)
+                           hard_taper=owner_taper(row))
                 record[_OWNER_SWAP_KEY] = row.share_swap_limit
                 record[_OWNER_HARD_KEY] = row.share_hard_limit
                 record[_OWNER_PACE_KEY] = row.share_hard_limit_pace
-                record[_OWNER_TAPER_KEY] = row.share_hard_limit_taper
+                record[_OWNER_TAPER_KEY] = owner_taper(row)
             data.setdefault("accounts", {})[num] = record
             if int(num) not in data.setdefault("sequence", []):
                 data["sequence"].append(int(num))

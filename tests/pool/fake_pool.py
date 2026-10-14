@@ -298,6 +298,9 @@ class FakePool:
                 new["needs_relogin_since"] = None
                 new["needs_relogin_reported_by"] = None
 
+        if self.taper and (new.get("share_hard_limit_pace") or new.get("share_hard_limit") is None):
+            new["share_hard_limit_taper"] = False   # 0005: taper needs a number, never with pace
+
         if new["status"] == "needs_relogin" and old["status"] != "needs_relogin":
             new["needs_relogin_since"] = new.get("needs_relogin_since") or _now_iso()
         new["updated_at"] = _now_iso()

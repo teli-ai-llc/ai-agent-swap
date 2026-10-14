@@ -207,7 +207,7 @@ def split_taper(raw: str | None) -> tuple[str | None, bool]:
     without its ``taper`` word, and whether it had one."""
     if raw is None:
         return None, False
-    words = raw.replace(",", " ").split()
+    words = raw.lower().replace(",", " ").replace(TAPER, f" {TAPER} ").split()
     taper = any(w.lower() == TAPER for w in words)
     return " ".join(w for w in words if w.lower() != TAPER), taper
 
@@ -265,7 +265,9 @@ def apply_rule(
     together with a number it wins over the number's clearing.
     ``hard_taper`` is the taper flag (``KEEP``: unchanged, unless pace is
     being turned on). Pace and taper are exclusive: turning one on turns
-    the other off.
+    the other off. Taper needs a number below 100 to taper from: asking for
+    it without one (or together with pace) raises ``ValueError`` rather than
+    quietly dropping a limit, and a kept flag whose number is cleared goes.
     """
     current = AccountRule() if reset else rule_from_record(record)
     if hard_limit is PACE:
@@ -276,11 +278,19 @@ def apply_rule(
         number, flag = hard_limit, False
     if hard_pace is not KEEP:
         flag = bool(hard_pace)
-    taper = current.hard_taper if hard_taper is KEEP else bool(hard_taper)
-    if taper and hard_taper is not KEEP:
-        flag = False  # taper asked for now: it replaces pace
-    elif flag:
-        taper = False
+    if hard_taper is not KEEP and hard_taper:
+        if hard_limit is PACE or (hard_limit is KEEP and current.hard_pace):
+            raise ValueError(
+                "a hard limit is either pace or taper; give a number to taper "
+                "from (e.g. --hard-limit 50 --taper)"
+            )
+        if number >= 100.0:
+            raise ValueError("taper needs a hard limit below 100 (e.g. --hard-limit 50 --taper)")
+        taper, flag = True, False  # taper asked for now: it replaces pace
+    else:
+        taper = current.hard_taper if hard_taper is KEEP else False
+        if flag or number >= 100.0:
+            taper = False  # pace replaces it; no number leaves nothing to taper
     updated = replace(
         current,
         swap_limit=current.swap_limit if swap_limit is KEEP else swap_limit,
